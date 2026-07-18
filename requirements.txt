@@ -1,0 +1,8 @@
+streamlit==1.59.0
+pandas>=2.2,<3
+numpy>=1.26,<3
+openpyxl==3.1.5
+Pillow>=10,<13
+XlsxWriter>=3.2,<4
+rapidocr==3.9.1
+onnxruntime>=1.22,<2
