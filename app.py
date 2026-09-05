@@ -17,7 +17,9 @@ executing it, this entrypoint applies focused V29 compatibility fixes:
 7. the V29 battery entry occupies the exact legacy battery-button slot so the
    new engine replaces the old entry instead of appearing as a second control;
 8. AI learning guard separates natural demand, confirmed manual intervention
-   and suspected intervention before future model training.
+   and suspected intervention before future model training;
+9. geolocation uses a visible direct user-triggered control before background
+   refresh, improving iPhone/in-app-browser permission reliability.
 """
 
 import time
@@ -381,6 +383,7 @@ _UPDATE_CONTENT_MD = """
 - AI 班別直接跟隨主頁班別；早班／晚班用當天，大夜用跨日後的營運日判斷平日／假日。
 - 一般分析的場站列已加入 AI 預測位置；模型尚未接入時明確顯示「學習中」。
 - AI 學習防污染：自然流量、人工調度、疑似人工調度分開標記；人工資料不進自然需求訓練。
+- iPhone 定位改為可見的直接定位按鈕；第一次由使用者點擊授權，成功後再進行背景更新。
 - 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。
 """
 if hasattr(st, "popover"):
@@ -480,6 +483,114 @@ replace_exact(
 
                         common_live_meta = {''',
     label="AI live transition classification",
+)
+
+# iPhone/in-app-browser geolocation fix. Do not schedule background geolocation
+# before the user has explicitly interacted with the visible location control.
+replace_exact(
+    '''  function scheduleAutoLocate() {
+    clearAutoTimer();
+    if (!args.auto_refresh) return;
+    const seconds = Math.max(10, Math.min(300, Number(args.auto_refresh_seconds || 30)));
+    autoTimer = window.setTimeout(() => {
+      autoTimer = null;
+      if (busy) scheduleAutoLocate();
+      else runLocate({ automatic: true });
+    }, seconds * 1000);
+  }''',
+    '''  function scheduleAutoLocate() {
+    clearAutoTimer();
+    if (!args.auto_refresh || !autoStarted) return;
+    const seconds = Math.max(10, Math.min(300, Number(args.auto_refresh_seconds || 30)));
+    autoTimer = window.setTimeout(() => {
+      autoTimer = null;
+      if (busy) scheduleAutoLocate();
+      else runLocate({ automatic: true });
+    }, seconds * 1000);
+  }''',
+    label="geolocation wait for direct user gesture",
+)
+
+replace_exact(
+    '''      error => {
+        const message = error && error.message ? error.message : "定位失敗";
+        setValue({
+          ok: false,
+          event_id: eventId(),
+          request_token: String(args.request_token || ""),
+          error: message,
+        });
+        setStatus(`定位失敗：${message}`, true);
+        busy = false;
+        button.disabled = false;
+        button.textContent = "📍 再試一次";
+        scheduleAutoLocate();
+      },''',
+    '''      error => {
+        const code = Number(error?.code || 0);
+        let message = error && error.message ? error.message : "定位失敗";
+        if (code === 1) {
+          message = "位置權限被拒絕；請到 iPhone 設定開啟此瀏覽器／App 的位置權限後再試一次";
+        } else if (code === 2) {
+          message = "目前無法取得位置；請確認定位服務已開啟並稍後再試";
+        } else if (code === 3) {
+          message = "定位逾時；請到室外或靠近窗邊後再試一次";
+        }
+        setValue({
+          ok: false,
+          event_id: eventId(),
+          request_token: String(args.request_token || ""),
+          error: message,
+        });
+        setStatus(`定位失敗：${message}`, true);
+        busy = false;
+        button.disabled = false;
+        button.textContent = "📍 再試一次";
+        scheduleAutoLocate();
+      },''',
+    label="geolocation readable mobile errors",
+)
+
+replace_exact(
+    '  button.addEventListener("click", () => runLocate());',
+    '''  button.addEventListener("click", () => {
+    autoStarted = true;
+    runLocate({ automatic: false, forceDelivery: true });
+  });''',
+    label="geolocation direct click",
+)
+
+replace_exact(
+    '''            auto_start=True,
+            auto_refresh=True,
+            auto_refresh_seconds=SHARED_GEOLOCATION_REFRESH_SECONDS,
+            compact=True,''',
+    '''            auto_start=bool(st.session_state.get(state_key)),
+            auto_refresh=True,
+            auto_refresh_seconds=SHARED_GEOLOCATION_REFRESH_SECONDS,
+            compact=False,''',
+    label="visible geolocation component",
+)
+
+replace_exact(
+    '''# 配置表一載入就開始定位，之後每 30 秒在背景更新一次。
+shared_location = render_shared_geolocation(active_base)
+with st.sidebar:
+    render_shared_location_summary(active_base, shared_location)
+    if st.button(
+        "立即更新定位",
+        use_container_width=True,
+        key=f"sidebar_refresh_location::{active_base['token']}",
+    ):
+        request_shared_geolocation_refresh(active_base)
+        rerun_app()''',
+    '''# 第一次定位必須由使用者直接點擊；授權成功後保留背景更新能力。
+with st.sidebar:
+    st.caption("📍 目前位置")
+    st.caption("第一次請直接按下方定位按鈕；成功後系統會自動更新距離與智慧調度路線。")
+    shared_location = render_shared_geolocation(active_base)
+    render_shared_location_summary(active_base, shared_location)''',
+    label="sidebar direct geolocation control",
 )
 
 # Keep the legacy browser battery implementation in the source for rollback,
