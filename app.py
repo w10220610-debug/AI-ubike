@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""V29 old-UI compatibility entrypoint.
+V29_COMPATIBILITY_NOTES = """V29 old-UI compatibility entrypoint.
 
 The original legacy UI is kept byte-for-byte in ``legacy_ui.py``. Before
 executing it, this entrypoint applies focused V29 compatibility fixes:
@@ -12,8 +12,8 @@ executing it, this entrypoint applies focused V29 compatibility fixes:
    hidden browser Streamlit component on mobile;
 5. the floating refresh button requests a fresh server sync by reloading with a
    one-time refresh token when no browser component exists;
-6. the floating battery query uses the V29 Server battery engine and a mobile-
-   safe one-way HTML UI, avoiding custom-component readiness failures;
+6. the floating battery query uses the V29 Fast Client battery engine and a
+   mobile-safe one-way HTML UI, avoiding custom-component readiness failures;
 7. the V29 battery entry occupies the exact legacy battery-button slot so the
    new engine replaces the old entry instead of appearing as a second control.
 """
@@ -129,6 +129,12 @@ replace_exact(
     '''battery_route_map = merge_battery_route_station_maps(\n    build_battery_route_station_map(base_df),\n    DEFAULT_BATTERY_ROUTE_STATION_MAP,\n)''',
     '''battery_route_map = build_battery_route_station_map(base_df)''',
     label="uploaded-workbook battery range",
+)
+
+replace_exact(
+    '''st.set_page_config(\n    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",\n    page_icon="🚚",\n    layout="wide",\n)''',
+    '''st.set_page_config(\n    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",\n    page_icon="🚚",\n    layout="wide",\n)\n\n_UPDATE_CONTENT_MD = """\n#### V29 更新內容\n- 電池查詢範圍支援 Excel 任意區域，不再限制 D1／D2／D3。\n- 上傳外縣市 Excel 時，不會混入台東內建備援場站。\n- 未上傳配置表時，仍保留台東備援電量查詢。\n- 場站即時車數使用 V29 同步架構，不再依賴手機隱藏同步元件。\n- 右側更新按鈕可重新取得即時場站資料。\n- 電池查詢已升級為 V29 Fast Client：並行查詢、逐站回填，不阻塞主畫面。\n- 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。\n"""\nif hasattr(st, "popover"):\n    with st.popover("更新內容"):\n        st.markdown(_UPDATE_CONTENT_MD)\nelse:\n    with st.expander("更新內容", expanded=False):\n        st.markdown(_UPDATE_CONTENT_MD)''',
+    label="update content popover",
 )
 
 # Keep the legacy browser battery implementation in the source for rollback,
