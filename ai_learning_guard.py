@@ -9,6 +9,14 @@ from typing import Any
 
 import pandas as pd
 
+from streamlit_component_compat import install_component_declare_compat
+
+
+# Install before legacy_ui.py is exec()'d by app.py. This keeps Streamlit v1
+# custom component registration inside a real imported Python module and avoids
+# inspect.getmodule(caller_frame) returning None for the legacy exec context.
+install_component_declare_compat()
+
 
 # Conservative first-pass guardrails. Suspected intervention is excluded from
 # natural-demand training until a later review/confirmation step exists.
