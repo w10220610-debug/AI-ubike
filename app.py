@@ -214,9 +214,19 @@ replace_exact(
     label="uploaded-workbook battery range",
 )
 
+# General-analysis rows reserve a compact AI prediction line now. Until the
+# learning database/model is connected, show an explicit learning state rather
+# than inventing a forecast. The same slot can later render 30m/risk output.
+replace_exact(
+    """            f'<small>{"｜".join(station_meta)}</small></td>'""",
+    """            f'<small>{"｜".join(station_meta)}</small>'
+            f'<small class="analysis-ai-prediction" style="color:#55f6ff;opacity:.92;font-weight:850;">🔮 AI 預測：學習中</small></td>'""",
+    label="general analysis AI prediction slot",
+)
+
 replace_exact(
     '''st.set_page_config(\n    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",\n    page_icon="🚚",\n    layout="wide",\n)''',
-    '''st.set_page_config(\n    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",\n    page_icon="🚚",\n    layout="wide",\n)\n\n_UPDATE_CONTENT_MD = """\n#### V29 更新內容\n- 電池查詢範圍支援 Excel 任意區域，不再限制 D1／D2／D3。\n- 上傳外縣市 Excel 時，不會混入台東內建備援場站。\n- 未上傳配置表時，仍保留台東備援電量查詢。\n- 場站即時車數使用 V29 同步架構，不再依賴手機隱藏同步元件。\n- 右側更新按鈕可重新取得即時場站資料。\n- 電池查詢已升級為 V29 Fast Client：並行查詢、逐站回填，不阻塞主畫面。\n- 電池場站展開後，低電車明細依柱號由小到大排列。\n- AI 班別直接跟隨主頁班別；早班／晚班用當天，大夜用跨日後的營運日判斷平日／假日。\n- 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。\n"""\nif hasattr(st, "popover"):\n    with st.popover("更新內容"):\n        st.markdown(_UPDATE_CONTENT_MD)\nelse:\n    with st.expander("更新內容", expanded=False):\n        st.markdown(_UPDATE_CONTENT_MD)''',
+    '''st.set_page_config(\n    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",\n    page_icon="🚚",\n    layout="wide",\n)\n\n_UPDATE_CONTENT_MD = """\n#### V29 更新內容\n- 電池查詢範圍支援 Excel 任意區域，不再限制 D1／D2／D3。\n- 上傳外縣市 Excel 時，不會混入台東內建備援場站。\n- 未上傳配置表時，仍保留台東備援電量查詢。\n- 場站即時車數使用 V29 同步架構，不再依賴手機隱藏同步元件。\n- 右側更新按鈕可重新取得即時場站資料。\n- 電池查詢已升級為 V29 Fast Client：並行查詢、逐站回填，不阻塞主畫面。\n- 電池場站展開後，低電車明細依柱號由小到大排列。\n- AI 班別直接跟隨主頁班別；早班／晚班用當天，大夜用跨日後的營運日判斷平日／假日。\n- 一般分析的場站列已加入 AI 預測位置；模型尚未接入時明確顯示「學習中」。\n- 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。\n"""\nif hasattr(st, "popover"):\n    with st.popover("更新內容"):\n        st.markdown(_UPDATE_CONTENT_MD)\nelse:\n    with st.expander("更新內容", expanded=False):\n        st.markdown(_UPDATE_CONTENT_MD)''',
     label="update content popover",
 )
 
