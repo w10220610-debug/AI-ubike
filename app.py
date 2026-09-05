@@ -15,13 +15,22 @@ executing it, this entrypoint applies focused V29 compatibility fixes:
 6. the floating battery query uses the V29 Fast Client battery engine and a
    mobile-safe one-way HTML UI, avoiding custom-component readiness failures;
 7. the V29 battery entry occupies the exact legacy battery-button slot so the
-   new engine replaces the old entry instead of appearing as a second control.
+   new engine replaces the old entry instead of appearing as a second control;
+8. AI learning guard separates natural demand, confirmed manual intervention
+   and suspected intervention before future model training.
 """
 
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from ai_learning_guard import (
+    MAX_MANUAL_EVENTS,
+    build_manual_intervention_event,
+    classify_live_transition,
+    trim_learning_records,
+)
 from battery_icon_data import BATTERY_ICON_DATA_URI
 from battery_upgrade import render_floating_server_battery as _render_floating_server_battery
 
@@ -33,6 +42,7 @@ source = LEGACY_APP.read_text(encoding="utf-8")
 AI_TIMEZONE = ZoneInfo("Asia/Taipei")
 AI_NIGHT_SHIFT_END_HOUR = 7
 AI_NIGHT_SHIFT_END_MINUTE = 30
+AI_LEARNING_META_KEY = "__ai_learning__"
 
 
 def resolve_ai_shift_context(shift: str, now: datetime | None = None) -> dict[str, str]:
@@ -70,6 +80,126 @@ def resolve_ai_shift_context(shift: str, now: datetime | None = None) -> dict[st
         "operating_date": operating_date.isoformat(),
         "actual_datetime": local_now.isoformat(),
     }
+
+
+def _ai_learning_meta(status_cache: dict) -> dict:
+    metadata = status_cache.setdefault("metadata", {})
+    learning = metadata.setdefault(AI_LEARNING_META_KEY, {})
+    if not isinstance(learning, dict):
+        learning = {}
+        metadata[AI_LEARNING_META_KEY] = learning
+    return learning
+
+
+def render_ai_learning_guard_controls(
+    base_df,
+    *,
+    active_base: dict,
+    status_cache: dict,
+) -> None:
+    """Compact manual-intervention recorder shared by analysis/dispatch pages."""
+    if base_df is None or getattr(base_df, "empty", True) or "場站名稱" not in base_df.columns:
+        return
+
+    station_names = [
+        name
+        for name in dict.fromkeys(str(value or "").strip() for value in base_df["場站名稱"].tolist())
+        if name
+    ]
+    if not station_names:
+        return
+
+    learning = _ai_learning_meta(status_cache)
+    manual_events = learning.setdefault("manual_events", [])
+    if not isinstance(manual_events, list):
+        manual_events = []
+        learning["manual_events"] = manual_events
+    summary = learning.get("last_summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+
+    token = str(active_base.get("token") or "default")
+    ai_context = st.session_state.get("ai_shift_context", {})
+    with st.expander("🛠️ AI 人工調度紀錄", expanded=False):
+        st.caption(
+            "有自行調度時記一筆即可。正數＝補進場站，負數＝從場站載走；"
+            "兩欄都填 0 也可只標記『此站有人工作業』。"
+        )
+        if summary:
+            st.caption(
+                "最近一次同步分類｜"
+                f"自然 {int(summary.get('natural', 0))}｜"
+                f"人工 {int(summary.get('manual_intervention', 0))}｜"
+                f"疑似人工 {int(summary.get('suspected_intervention', 0))}"
+            )
+
+        station_name = st.selectbox(
+            "場站",
+            station_names,
+            key=f"ai_manual_station::{token}",
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            bike_delta = int(
+                st.number_input(
+                    "2.0 變化",
+                    min_value=-30,
+                    max_value=30,
+                    value=0,
+                    step=1,
+                    key=f"ai_manual_bike_delta::{token}",
+                )
+            )
+        with c2:
+            ebike_delta = int(
+                st.number_input(
+                    "2.0E 變化",
+                    min_value=-30,
+                    max_value=30,
+                    value=0,
+                    step=1,
+                    key=f"ai_manual_ebike_delta::{token}",
+                )
+            )
+
+        if st.button(
+            "記錄人工調度",
+            use_container_width=True,
+            key=f"ai_manual_save::{token}",
+        ):
+            event = build_manual_intervention_event(
+                station_name=station_name,
+                bike_delta=bike_delta,
+                ebike_delta=ebike_delta,
+                ai_context=ai_context,
+            )
+            manual_events.append(event)
+            learning["manual_events"] = manual_events[-MAX_MANUAL_EVENTS:]
+            save_cached_status(
+                active_base["token"],
+                active_base.get("expires_at"),
+                status_cache,
+            )
+            st.success(f"已標記人工調度：{station_name}")
+
+        recent = [item for item in manual_events if isinstance(item, dict)][-3:]
+        if recent:
+            st.caption("最近人工紀錄")
+            for event in reversed(recent):
+                try:
+                    when = datetime.fromtimestamp(
+                        float(event.get("recorded_at_epoch") or 0),
+                        AI_TIMEZONE,
+                    ).strftime("%H:%M:%S")
+                except (TypeError, ValueError, OSError):
+                    when = "—"
+                bike = int(event.get("bike_delta") or 0)
+                ebike = int(event.get("ebike_delta") or 0)
+                used = "｜已套用" if event.get("consumed") else "｜待下次同步"
+                st.caption(
+                    f"{when}｜{event.get('station_name', '')}｜"
+                    f"2.0 {bike:+d}｜2.0E {ebike:+d}{used}"
+                )
 
 
 def render_floating_battery_query(
@@ -209,7 +339,10 @@ replace_exact(
     label="empty-zone message",
 )
 replace_exact(
-    '''battery_route_map = merge_battery_route_station_maps(\n    build_battery_route_station_map(base_df),\n    DEFAULT_BATTERY_ROUTE_STATION_MAP,\n)''',
+    '''battery_route_map = merge_battery_route_station_maps(
+    build_battery_route_station_map(base_df),
+    DEFAULT_BATTERY_ROUTE_STATION_MAP,
+)''',
     '''battery_route_map = build_battery_route_station_map(base_df)''',
     label="uploaded-workbook battery range",
 )
@@ -225,15 +358,128 @@ replace_exact(
 )
 
 replace_exact(
-    '''st.set_page_config(\n    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",\n    page_icon="🚚",\n    layout="wide",\n)''',
-    '''st.set_page_config(\n    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",\n    page_icon="🚚",\n    layout="wide",\n)\n\n_UPDATE_CONTENT_MD = """\n#### V29 更新內容\n- 電池查詢範圍支援 Excel 任意區域，不再限制 D1／D2／D3。\n- 上傳外縣市 Excel 時，不會混入台東內建備援場站。\n- 未上傳配置表時，仍保留台東備援電量查詢。\n- 場站即時車數使用 V29 同步架構，不再依賴手機隱藏同步元件。\n- 右側更新按鈕可重新取得即時場站資料。\n- 電池查詢已升級為 V29 Fast Client：並行查詢、逐站回填，不阻塞主畫面。\n- 電池場站展開後，低電車明細依柱號由小到大排列。\n- AI 班別直接跟隨主頁班別；早班／晚班用當天，大夜用跨日後的營運日判斷平日／假日。\n- 一般分析的場站列已加入 AI 預測位置；模型尚未接入時明確顯示「學習中」。\n- 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。\n"""\nif hasattr(st, "popover"):\n    with st.popover("更新內容"):\n        st.markdown(_UPDATE_CONTENT_MD)\nelse:\n    with st.expander("更新內容", expanded=False):\n        st.markdown(_UPDATE_CONTENT_MD)''',
+    '''st.set_page_config(
+    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",
+    page_icon="🚚",
+    layout="wide",
+)''',
+    '''st.set_page_config(
+    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",
+    page_icon="🚚",
+    layout="wide",
+)
+
+_UPDATE_CONTENT_MD = """
+#### V29 更新內容
+- 電池查詢範圍支援 Excel 任意區域，不再限制 D1／D2／D3。
+- 上傳外縣市 Excel 時，不會混入台東內建備援場站。
+- 未上傳配置表時，仍保留台東備援電量查詢。
+- 場站即時車數使用 V29 同步架構，不再依賴手機隱藏同步元件。
+- 右側更新按鈕可重新取得即時場站資料。
+- 電池查詢已升級為 V29 Fast Client：並行查詢、逐站回填，不阻塞主畫面。
+- 電池場站展開後，低電車明細依柱號由小到大排列。
+- AI 班別直接跟隨主頁班別；早班／晚班用當天，大夜用跨日後的營運日判斷平日／假日。
+- 一般分析的場站列已加入 AI 預測位置；模型尚未接入時明確顯示「學習中」。
+- AI 學習防污染：自然流量、人工調度、疑似人工調度分開標記；人工資料不進自然需求訓練。
+- 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。
+"""
+if hasattr(st, "popover"):
+    with st.popover("更新內容"):
+        st.markdown(_UPDATE_CONTENT_MD)
+else:
+    with st.expander("更新內容", expanded=False):
+        st.markdown(_UPDATE_CONTENT_MD)''',
     label="update content popover",
 )
 
 replace_exact(
-    '''    selected_shift = st.selectbox(\n        "班別",\n        list(SHIFT_COLUMNS.keys()),\n        key=f"shift::{active_base['token']}",\n    )\n    page_mode = st.radio(''',
-    '''    selected_shift = st.selectbox(\n        "班別",\n        list(SHIFT_COLUMNS.keys()),\n        key=f"shift::{active_base['token']}",\n    )\n    _ai_shift_context = resolve_ai_shift_context(selected_shift)\n    st.session_state["ai_shift_context"] = _ai_shift_context\n    st.caption(\n        f"🤖 AI 模式：{_ai_shift_context['day_type']}・{_ai_shift_context['shift']}"\n    )\n    page_mode = st.radio(''',
+    '''    selected_shift = st.selectbox(
+        "班別",
+        list(SHIFT_COLUMNS.keys()),
+        key=f"shift::{active_base['token']}",
+    )
+    page_mode = st.radio(''',
+    '''    selected_shift = st.selectbox(
+        "班別",
+        list(SHIFT_COLUMNS.keys()),
+        key=f"shift::{active_base['token']}",
+    )
+    _ai_shift_context = resolve_ai_shift_context(selected_shift)
+    st.session_state["ai_shift_context"] = _ai_shift_context
+    st.caption(
+        f"🤖 AI 模式：{_ai_shift_context['day_type']}・{_ai_shift_context['shift']}"
+    )
+    page_mode = st.radio(''',
     label="AI shift day context",
+)
+
+replace_exact(
+    '''render_context_strip(
+    route=f"{selected_configuration_type}｜D1／D2／D3",
+    shift=selected_shift,
+    station_count=len(base_df),
+    page_mode=page_mode,
+    live_meta=previous_live_meta,
+)
+render_binding_vehicle_requirements(base_df, selected_shift=selected_shift)''',
+    '''render_context_strip(
+    route=f"{selected_configuration_type}｜D1／D2／D3",
+    shift=selected_shift,
+    station_count=len(base_df),
+    page_mode=page_mode,
+    live_meta=previous_live_meta,
+)
+render_ai_learning_guard_controls(
+    base_df,
+    active_base=active_base,
+    status_cache=status_cache,
+)
+render_binding_vehicle_requirements(base_df, selected_shift=selected_shift)''',
+    label="AI manual intervention recorder",
+)
+
+replace_exact(
+    '''                    else:
+                        base_df = live_updated_df
+                        live_event_id = str(live_payload.get("event_id") or browser_event_id or "")
+                        common_live_meta = {''',
+    '''                    else:
+                        previous_ai_df = base_df.copy(deep=True)
+                        base_df = live_updated_df
+                        live_event_id = str(live_payload.get("event_id") or browser_event_id or "")
+
+                        ai_learning_meta = _ai_learning_meta(status_cache)
+                        ai_transition = classify_live_transition(
+                            previous_ai_df,
+                            base_df,
+                            manual_events=ai_learning_meta.get("manual_events", []),
+                            ai_context=st.session_state.get("ai_shift_context", {}),
+                            observed_at_epoch=time.time(),
+                            source_event_id=live_event_id,
+                        )
+                        ai_learning_meta["manual_events"] = ai_transition["manual_events"]
+                        changed_ai_records = [
+                            record
+                            for record in ai_transition["records"]
+                            if (
+                                record.get("classification") in {
+                                    "manual_intervention",
+                                    "suspected_intervention",
+                                }
+                                or record.get("bike_delta") not in (None, 0)
+                                or record.get("ebike_delta") not in (None, 0)
+                            )
+                        ]
+                        existing_ai_records = ai_learning_meta.get("transitions", [])
+                        if not isinstance(existing_ai_records, list):
+                            existing_ai_records = []
+                        existing_ai_records.extend(changed_ai_records)
+                        ai_learning_meta["transitions"] = trim_learning_records(existing_ai_records)
+                        ai_learning_meta["last_summary"] = ai_transition["summary"]
+                        ai_learning_meta["last_observed_at_epoch"] = ai_transition["observed_at_epoch"]
+
+                        common_live_meta = {''',
+    label="AI live transition classification",
 )
 
 # Keep the legacy browser battery implementation in the source for rollback,
@@ -249,7 +495,51 @@ replace_exact(
 # shape, so the existing matching, cache persistence and rendering remain intact.
 replace_exact(
     'def normalize_browser_live_payload(payload) -> dict:',
-    '''def get_youbike_browser_sync_component():\n    """V29 compatibility: obtain live station data from the Python Server."""\n    from live_status_service import LiveStatusServiceError, get_live_status_for_stations\n\n    def _server_sync_component(**_kwargs):\n        stations = globals().get("_V29_SERVER_LIVE_STATIONS", [])\n        if not stations:\n            return {\n                "ok": False,\n                "event_id": uuid.uuid4().hex,\n                "error": "目前配置沒有可供同步的場站。",\n            }\n\n        refresh_token = ""\n        try:\n            refresh_token = str(st.query_params.get("live_refresh", "") or "").strip()\n        except Exception:\n            refresh_token = ""\n        refresh_state_key = "v29_server_live_refresh_token"\n        force_refresh = bool(\n            refresh_token\n            and st.session_state.get(refresh_state_key) != refresh_token\n        )\n        if force_refresh:\n            st.session_state[refresh_state_key] = refresh_token\n\n        try:\n            return get_live_status_for_stations(stations, force=force_refresh)\n        except LiveStatusServiceError as exc:\n            return {\n                "ok": False,\n                "event_id": uuid.uuid4().hex,\n                "error": str(exc),\n            }\n        except Exception as exc:\n            return {\n                "ok": False,\n                "event_id": uuid.uuid4().hex,\n                "error": f"Server 即時車數同步失敗：{exc}",\n            }\n\n    return _server_sync_component\n\n\ndef normalize_browser_live_payload(payload) -> dict:''',
+    '''def get_youbike_browser_sync_component():
+    """V29 compatibility: obtain live station data from the Python Server."""
+    from live_status_service import LiveStatusServiceError, get_live_status_for_stations
+
+    def _server_sync_component(**_kwargs):
+        stations = globals().get("_V29_SERVER_LIVE_STATIONS", [])
+        if not stations:
+            return {
+                "ok": False,
+                "event_id": uuid.uuid4().hex,
+                "error": "目前配置沒有可供同步的場站。",
+            }
+
+        refresh_token = ""
+        try:
+            refresh_token = str(st.query_params.get("live_refresh", "") or "").strip()
+        except Exception:
+            refresh_token = ""
+        refresh_state_key = "v29_server_live_refresh_token"
+        force_refresh = bool(
+            refresh_token
+            and st.session_state.get(refresh_state_key) != refresh_token
+        )
+        if force_refresh:
+            st.session_state[refresh_state_key] = refresh_token
+
+        try:
+            return get_live_status_for_stations(stations, force=force_refresh)
+        except LiveStatusServiceError as exc:
+            return {
+                "ok": False,
+                "event_id": uuid.uuid4().hex,
+                "error": str(exc),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "event_id": uuid.uuid4().hex,
+                "error": f"Server 即時車數同步失敗：{exc}",
+            }
+
+    return _server_sync_component
+
+
+def normalize_browser_live_payload(payload) -> dict:''',
     label="server live component adapter",
 )
 
@@ -257,7 +547,15 @@ replace_exact(
 # This also makes the server sync automatically follow cross-county Excel data.
 replace_exact(
     '    browser_payload = None',
-    '''    _V29_SERVER_LIVE_STATIONS = [\n        {\n            "name": str(row.get("場站名稱") or "").strip(),\n            "district": str(row.get("行政區") or "").strip(),\n        }\n        for _, row in base_df.iterrows()\n        if str(row.get("場站名稱") or "").strip()\n    ]\n    browser_payload = None''',
+    '''    _V29_SERVER_LIVE_STATIONS = [
+        {
+            "name": str(row.get("場站名稱") or "").strip(),
+            "district": str(row.get("行政區") or "").strip(),
+        }
+        for _, row in base_df.iterrows()
+        if str(row.get("場站名稱") or "").strip()
+    ]
+    browser_payload = None''',
     label="server live station scope",
 )
 
@@ -265,8 +563,24 @@ replace_exact(
 # Streamlit iframe. With the V29 server adapter there is intentionally no iframe.
 # A refresh token causes one forced server fetch on the next Streamlit run.
 replace_exact(
-    '''                if (!postedCount) {{\n                    showToast("同步元件尚未準備完成，請稍後再按一次");\n                    return;\n                }}\n                setRefreshButtonState(true);''',
-    '''                if (!postedCount) {{\n                    setRefreshButtonState(true);\n                    showToast("正在重新同步 YouBike 即時資料…");\n                    try {{\n                        const refreshUrl = new URL(win.location.href);\n                        refreshUrl.searchParams.set("live_refresh", String(Date.now()));\n                        win.location.href = refreshUrl.toString();\n                    }} catch (_refreshError) {{\n                        win.location.reload();\n                    }}\n                    return;\n                }}\n                setRefreshButtonState(true);''',
+    '''                if (!postedCount) {{
+                    showToast("同步元件尚未準備完成，請稍後再按一次");
+                    return;
+                }}
+                setRefreshButtonState(true);''',
+    '''                if (!postedCount) {{
+                    setRefreshButtonState(true);
+                    showToast("正在重新同步 YouBike 即時資料…");
+                    try {{
+                        const refreshUrl = new URL(win.location.href);
+                        refreshUrl.searchParams.set("live_refresh", String(Date.now()));
+                        win.location.href = refreshUrl.toString();
+                    }} catch (_refreshError) {{
+                        win.location.reload();
+                    }}
+                    return;
+                }}
+                setRefreshButtonState(true);''',
     label="server live floating refresh",
 )
 
