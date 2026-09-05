@@ -13,16 +13,83 @@ executing it, this entrypoint applies focused V29 compatibility fixes:
 5. the floating refresh button requests a fresh server sync by reloading with a
    one-time refresh token when no browser component exists;
 6. the floating battery query uses the V29 Server battery engine and a mobile-
-   safe one-way HTML UI, avoiding custom-component readiness failures.
+   safe one-way HTML UI, avoiding custom-component readiness failures;
+7. the V29 battery entry occupies the exact legacy battery-button slot so the
+   new engine replaces the old entry instead of appearing as a second control.
 """
 
 from pathlib import Path
 
-from battery_upgrade import render_floating_server_battery as render_floating_battery_query
+from battery_upgrade import render_floating_server_battery as _render_floating_server_battery
 
 
 LEGACY_APP = Path(__file__).with_name("legacy_ui.py")
 source = LEGACY_APP.read_text(encoding="utf-8")
+
+
+def render_floating_battery_query(
+    route_station_map: dict[str, list[dict]],
+    mobile_mode: bool,
+) -> None:
+    """Render V29 Server battery UI in the legacy floating-button position."""
+    _render_floating_server_battery(route_station_map, mobile_mode)
+
+    # battery_upgrade owns the data/UI engine. This tiny one-way HTML shim only
+    # preserves the legacy physical slot and removes any hot-reload leftovers.
+    # ``components`` is imported by legacy_ui.py before any call reaches here.
+    components.html(
+        r'''
+        <script>
+        (() => {
+          const doc = window.parent.document;
+          ['ubike-battery-fab', 'ubike-battery-page', 'ubike-battery-style'].forEach(id => {
+            try { doc.getElementById(id)?.remove(); } catch (_) {}
+          });
+
+          let style = doc.getElementById('ubike-v29-legacy-slot-style');
+          if (!style) {
+            style = doc.createElement('style');
+            style.id = 'ubike-v29-legacy-slot-style';
+            doc.head.appendChild(style);
+          }
+          style.textContent = `
+            #ub-v29-fab {
+              right: 18px !important;
+              bottom: 278px !important;
+              width: 56px !important;
+              height: 56px !important;
+              border-radius: 16px !important;
+              font: 850 13px/1.1 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft JhengHei", sans-serif !important;
+              color: #061116 !important;
+              background: linear-gradient(135deg, #55f6ff, #f4ff57) !important;
+              box-shadow: 0 0 24px rgba(85,246,255,.38), 0 8px 28px rgba(0,0,0,.34) !important;
+            }
+            @media (max-width: 700px) {
+              #ub-v29-fab {
+                right: 10px !important;
+                bottom: calc(312px + env(safe-area-inset-bottom, 0px)) !important;
+                width: 52px !important;
+                height: 52px !important;
+              }
+            }
+          `;
+
+          const applyLabel = () => {
+            const fab = doc.getElementById('ub-v29-fab');
+            if (!fab) return;
+            fab.textContent = '⚡電量';
+            fab.title = '查詢 YouBike 2.0E 電量';
+            fab.setAttribute('aria-label', '電量查詢');
+          };
+          applyLabel();
+          window.setTimeout(applyLabel, 80);
+          window.setTimeout(applyLabel, 300);
+        })();
+        </script>
+        ''',
+        height=0,
+        scrolling=False,
+    )
 
 
 def replace_exact(old: str, new: str, *, label: str) -> None:
@@ -62,8 +129,7 @@ replace_exact(
 )
 
 # Keep the legacy browser battery implementation in the source for rollback,
-# but rename it so every existing call site resolves to the imported V29 Server
-# implementation above.
+# but rename it so every existing call site resolves to the V29 wrapper above.
 replace_exact(
     'def render_floating_battery_query(\n',
     'def render_floating_battery_query_legacy(\n',
