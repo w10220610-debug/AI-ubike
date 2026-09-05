@@ -11,10 +11,14 @@ executing it, this entrypoint applies focused V29 compatibility fixes:
 4. live station sync uses the V29 Python Server service instead of requiring a
    hidden browser Streamlit component on mobile;
 5. the floating refresh button requests a fresh server sync by reloading with a
-   one-time refresh token when no browser component exists.
+   one-time refresh token when no browser component exists;
+6. the floating battery query uses the V29 Server battery engine and a mobile-
+   safe one-way HTML UI, avoiding custom-component readiness failures.
 """
 
 from pathlib import Path
+
+from battery_upgrade import render_floating_server_battery as render_floating_battery_query
 
 
 LEGACY_APP = Path(__file__).with_name("legacy_ui.py")
@@ -57,10 +61,18 @@ replace_exact(
     label="uploaded-workbook battery range",
 )
 
-# Replace the browser-only component factory with a Python Server backed
-# callable. Downstream legacy UI code still receives the same payload shape, so
-# the existing matching, cache persistence and UI rendering do not need to be
-# rewritten.
+# Keep the legacy browser battery implementation in the source for rollback,
+# but rename it so every existing call site resolves to the imported V29 Server
+# implementation above.
+replace_exact(
+    'def render_floating_battery_query(\n',
+    'def render_floating_battery_query_legacy(\n',
+    label="replace floating battery implementation",
+)
+
+# Replace the browser-only live-status component factory with a Python Server
+# backed callable. Downstream legacy UI code still receives the same payload
+# shape, so the existing matching, cache persistence and rendering remain intact.
 replace_exact(
     'def normalize_browser_live_payload(payload) -> dict:',
     '''def get_youbike_browser_sync_component():\n    """V29 compatibility: obtain live station data from the Python Server."""\n    from live_status_service import LiveStatusServiceError, get_live_status_for_stations\n\n    def _server_sync_component(**_kwargs):\n        stations = globals().get("_V29_SERVER_LIVE_STATIONS", [])\n        if not stations:\n            return {\n                "ok": False,\n                "event_id": uuid.uuid4().hex,\n                "error": "目前配置沒有可供同步的場站。",\n            }\n\n        refresh_token = ""\n        try:\n            refresh_token = str(st.query_params.get("live_refresh", "") or "").strip()\n        except Exception:\n            refresh_token = ""\n        refresh_state_key = "v29_server_live_refresh_token"\n        force_refresh = bool(\n            refresh_token\n            and st.session_state.get(refresh_state_key) != refresh_token\n        )\n        if force_refresh:\n            st.session_state[refresh_state_key] = refresh_token\n\n        try:\n            return get_live_status_for_stations(stations, force=force_refresh)\n        except LiveStatusServiceError as exc:\n            return {\n                "ok": False,\n                "event_id": uuid.uuid4().hex,\n                "error": str(exc),\n            }\n        except Exception as exc:\n            return {\n                "ok": False,\n                "event_id": uuid.uuid4().hex,\n                "error": f"Server 即時車數同步失敗：{exc}",\n            }\n\n    return _server_sync_component\n\n\ndef normalize_browser_live_payload(payload) -> dict:''',
