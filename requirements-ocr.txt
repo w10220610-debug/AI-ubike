@@ -1,0 +1,4 @@
+-r requirements.txt
+Pillow>=10,<13
+rapidocr==3.9.1
+onnxruntime>=1.22,<2
