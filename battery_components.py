@@ -76,7 +76,7 @@ INLINE_COMPONENT_HTML = r'''<!doctype html><html><head><meta charset="utf-8"><st
 FLOATING_COMPONENT_HTML = r'''<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;background:transparent}</style></head><body>
 <script>
 (()=>{
- const API=1; let args={};
+ const API=1; const HISTORY_KEY='ubikeBatteryOverlay'; let args={};
  function send(type,data={}){window.parent.postMessage({isStreamlitMessage:true,type,...data},"*");}
  function setValue(value){send('streamlit:setComponentValue',{value});}
  function setHeight(){send('streamlit:setFrameHeight',{height:1});}
@@ -86,9 +86,38 @@ FLOATING_COMPONENT_HTML = r'''<!doctype html><html><head><meta charset="utf-8"><
   let fab=doc.getElementById('ubike-server-battery-fab');
   if(!fab){fab=doc.createElement('button');fab.id='ubike-server-battery-fab';fab.type='button';fab.textContent='⚡';fab.style.cssText='position:fixed;right:18px;bottom:110px;z-index:999990;width:52px;height:52px;border:0;border-radius:50%;background:#111827;color:white;font-size:23px;box-shadow:0 8px 28px rgba(0,0,0,.28);cursor:pointer;';doc.body.appendChild(fab);}
   let page=doc.getElementById('ubike-server-battery-page');
-  if(!page){page=doc.createElement('div');page.id='ubike-server-battery-page';page.style.cssText='display:none;position:fixed;inset:0;z-index:999989;background:#f7f8fb;color:#111827;overflow:auto;padding:env(safe-area-inset-top,0px) 12px env(safe-area-inset-bottom,0px);';doc.body.appendChild(page);}
-  fab.onclick=()=>{page.style.display='block';renderPage();};
+  if(!page){page=doc.createElement('div');page.id='ubike-server-battery-page';page.style.cssText='display:none;position:fixed;inset:0;z-index:999991;width:100%;height:100vh;height:100dvh;box-sizing:border-box;background:#f7f8fb;color:#111827;overflow:auto;overscroll-behavior:contain;padding:max(env(safe-area-inset-top),8px) 12px max(env(safe-area-inset-bottom),8px);';doc.body.appendChild(page);}
+  fab.onclick=openPage;
+  const win=doc.defaultView;
+  if(page._ubikePopHandler)win.removeEventListener('popstate',page._ubikePopHandler);
+  page._ubikePopHandler=()=>{page._ubikeHistory=false;hidePage();};
+  win.addEventListener('popstate',page._ubikePopHandler);
   return {doc,fab,page};
+ }
+ function hidePage(){
+   const {doc,fab,page}=ensure();
+   page.style.display='none';fab.style.display='';
+   doc.documentElement.style.overflow=page._ubikeHtmlOverflow||'';
+   doc.body.style.overflow=page._ubikeBodyOverflow||'';
+   const y=Number(page._ubikeScrollY||0);doc.defaultView.requestAnimationFrame(()=>doc.defaultView.scrollTo(0,y));
+ }
+ function openPage(){
+   const {doc,fab,page}=ensure();
+   if(page.style.display==='block'){renderPage();return;}
+   page._ubikeScrollY=doc.defaultView.scrollY||0;
+   page._ubikeHtmlOverflow=doc.documentElement.style.overflow;
+   page._ubikeBodyOverflow=doc.body.style.overflow;
+   page.style.display='block';fab.style.display='none';
+   doc.documentElement.style.overflow='hidden';doc.body.style.overflow='hidden';
+   renderPage();
+   try{const state={...(doc.defaultView.history.state||{})};state[HISTORY_KEY]=true;doc.defaultView.history.pushState(state,'',doc.defaultView.location.href);page._ubikeHistory=true;}catch(_){page._ubikeHistory=false;}
+ }
+ function closePage(){
+   const {doc,page}=ensure();
+   if(page._ubikeHistory&&doc.defaultView.history.state&&doc.defaultView.history.state[HISTORY_KEY]){
+     doc.defaultView.history.back();
+     doc.defaultView.setTimeout(()=>{if(page.style.display==='block')hidePage();},350);
+   }else{hidePage();}
  }
  function resultCards(results){
    const rows=Object.values(results||{}).filter(x=>x&&(!x.error)&&Number(x.low_count||0)>0);
@@ -102,8 +131,8 @@ FLOATING_COMPONENT_HTML = r'''<!doctype html><html><head><meta charset="utf-8"><
    const selected=Array.isArray(pref.zones)?pref.zones.filter(z=>zones.includes(z)):[];
    const threshold=Number.isFinite(Number(pref.threshold))?Number(pref.threshold):Number(args.threshold||89);
    const priority=Number.isFinite(Number(pref.priority_threshold))?Number(pref.priority_threshold):Number(args.priority_threshold||40);
-   page.innerHTML=`<div style="max-width:820px;margin:0 auto;padding:18px 4px 70px"><div style="display:flex;align-items:center;justify-content:space-between;gap:12px"><div><div style="font-size:23px;font-weight:900">⚡ 電量查詢</div><div style="font-size:12px;opacity:.65">V30：由 Python Server 查詢並共用快取</div></div><button id="ub30-close" style="border:0;background:#e5e7eb;border-radius:999px;padding:8px 13px">關閉</button></div><div style="background:white;border:1px solid #e5e7eb;border-radius:16px;padding:14px;margin-top:14px"><div style="font-weight:800;margin-bottom:8px">選擇範圍</div><div id="ub30-zones" style="display:flex;flex-wrap:wrap;gap:8px">${zones.map(z=>`<label style="padding:7px 10px;border:1px solid #d1d5db;border-radius:999px"><input type="checkbox" value="${esc(z)}" ${selected.includes(z)?'checked':''}> ${esc(z)} <span style="opacity:.55">(${(map[z]||[]).length})</span></label>`).join('')}</div><div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px"><label>低電門檻 <input id="ub30-th" type="number" min="0" max="100" value="${threshold}" style="width:68px"></label><label>紅色門檻 <input id="ub30-pr" type="number" min="0" max="100" value="${priority}" style="width:68px"></label><button id="ub30-query" style="border:0;border-radius:10px;background:#111827;color:white;padding:8px 16px;font-weight:800">查詢</button></div></div><div id="ub30-status" style="padding:10px 2px;font-size:13px;opacity:.7">${args.querying?'正在由 Server 查詢…':(args.last_message||'')}</div><div>${resultCards(results)}</div></div>`;
-   page.querySelector('#ub30-close').onclick=()=>{page.style.display='none';};
+   page.innerHTML=`<div style="max-width:820px;margin:0 auto;padding:0 4px 70px"><div style="position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:12px;background:#f7f8fb;padding:10px 0 12px"><button id="ub30-close" aria-label="返回原本頁面" style="min-width:76px;min-height:44px;border:0;background:#e5e7eb;border-radius:999px;padding:9px 14px;font-size:16px;font-weight:800;touch-action:manipulation">‹ 返回</button><div style="min-width:0;text-align:right"><div style="font-size:23px;font-weight:900">⚡ 電量查詢</div><div style="font-size:12px;opacity:.65">由伺服器查詢並共用快取</div></div></div><div style="background:white;border:1px solid #e5e7eb;border-radius:16px;padding:14px;margin-top:8px"><div style="font-weight:800;margin-bottom:8px">選擇範圍</div><div id="ub30-zones" style="display:flex;flex-wrap:wrap;gap:8px">${zones.map(z=>`<label style="padding:7px 10px;border:1px solid #d1d5db;border-radius:999px"><input type="checkbox" value="${esc(z)}" ${selected.includes(z)?'checked':''}> ${esc(z)} <span style="opacity:.55">(${(map[z]||[]).length})</span></label>`).join('')}</div><div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px"><label>低電門檻 <input id="ub30-th" type="number" min="0" max="100" value="${threshold}" style="width:68px"></label><label>紅色門檻 <input id="ub30-pr" type="number" min="0" max="100" value="${priority}" style="width:68px"></label><button id="ub30-query" style="border:0;border-radius:10px;background:#111827;color:white;padding:8px 16px;font-weight:800">查詢</button></div></div><div id="ub30-status" style="padding:10px 2px;font-size:13px;opacity:.7">${args.querying?'正在由 Server 查詢…':(args.last_message||'')}</div><div>${resultCards(results)}</div></div>`;
+   page.querySelector('#ub30-close').onclick=closePage;
    page.querySelector('#ub30-query').onclick=()=>{const zonesSelected=[...page.querySelectorAll('#ub30-zones input:checked')].map(x=>x.value);const th=Math.max(0,Math.min(100,Number(page.querySelector('#ub30-th').value||89)));const pr=Math.max(0,Math.min(th,Number(page.querySelector('#ub30-pr').value||40)));try{localStorage.setItem('ubike-v30-battery-pref',JSON.stringify({zones:zonesSelected,threshold:th,priority_threshold:pr}));}catch(_){};if(!zonesSelected.length){page.querySelector('#ub30-status').textContent='請至少選擇一個範圍';return;}page.querySelector('#ub30-query').disabled=true;page.querySelector('#ub30-status').textContent='正在由 Server 查詢…';setValue({action:'query_zones',zones:zonesSelected,threshold:th,priority_threshold:pr,nonce:Date.now()});};
  }
  function render(newArgs){args=newArgs||{};const {page}=ensure();if(page.style.display==='block')renderPage();}
@@ -249,3 +278,4 @@ def render_floating_server_battery(
             state["last_message"] = f"完成 {ok_count} 站" + (f"｜{failed_count} 站未取得" if failed_count else "")
             st.session_state[state_key] = state
             st.rerun()
+
