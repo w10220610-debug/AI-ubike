@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# 版本：V29｜原介面保留＋底層效能優化
+# 版本：V29 正式版｜原介面保留＋底層效能優化
 
 import base64
 import hashlib
@@ -38,14 +38,17 @@ from dispatch_core import (
 )
 from battery_components import render_floating_server_battery, render_inline_server_battery
 from battery_ui_adapter import query_stations_for_ui
+from config import (
+    APP_BUILD_DATE,
+    APP_VERSION,
+    APP_VERSION_NAME,
+    DEFAULT_BATTERY_PRIORITY_THRESHOLD,
+    DEFAULT_BATTERY_THRESHOLD,
+    SMART_DISPATCH_CANDIDATE_LIMIT,
+)
+from live_status_components import render_server_sync_trigger
+from live_status_service import LiveStatusServiceError, get_live_status_for_stations
 
-
-APP_VERSION = "V30.0"
-APP_VERSION_NAME = "測試版"
-APP_BUILD_DATE = "2026-08-31"
-DEFAULT_BATTERY_THRESHOLD = 89
-DEFAULT_BATTERY_PRIORITY_THRESHOLD = 40
-SMART_DISPATCH_CANDIDATE_LIMIT = 10
 
 # 賈維斯測試版：庫存場站平常不列入自動推薦；只有本站已接近空站或滿站時解鎖。
 INVENTORY_STATION_NAMES = ("臺東縣政府文化處圖書館", "臺東轉運站")
@@ -803,11 +806,6 @@ def inventory_station_needs_attention(plan: dict | pd.Series) -> bool:
     )
 
 
-YOUBIKE_STATION_CATALOG_URL = "https://apis.youbike.com.tw/json/station-min-yb2.json"
-YOUBIKE_PARKING_INFO_URL = "https://apis.youbike.com.tw/tw2/parkingInfo"
-YOUBIKE_REQUEST_TIMEOUT_SECONDS = 25
-YOUBIKE_HTTP_MAX_ATTEMPTS = 3
-YOUBIKE_STATION_BATCH_SIZE = 100
 YOUBIKE_MATCH_THRESHOLD = 0.82
 TAIPEI_TIMEZONE = ZoneInfo("Asia/Taipei")
 
@@ -816,500 +814,16 @@ class YouBikeDataError(RuntimeError):
     """YouBike 官網公開資料連線或格式異常。"""
 
 
-YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
-<html lang="zh-Hant">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    :root { color-scheme: light dark; }
-    * { box-sizing: border-box; }
-    html, body {
-      width: 1px; height: 1px; margin: 0; padding: 0; overflow: hidden;
-      background: transparent; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    /* 同步元件留在背景執行；手動操作改由主頁右側懸浮按鈕觸發。 */
-    #syncButton, #status { display: none !important; }
-    .error { color: #c62828 !important; }
-  </style>
-</head>
-<body>
-  <button id="syncButton" type="button">🔄 由手機／瀏覽器取得 YouBike 即時車數</button>
-  <div id="status"></div>
-<script>
-(() => {
-  const API_VERSION = 1;
-  const button = document.getElementById("syncButton");
-  const statusNode = document.getElementById("status");
-  let args = {};
-  let busy = false;
-  let autoTimer = null;
-  const SIGNATURE_STORAGE_KEY = "ubike-live-count-signature-v1";
-  const UNCHANGED_HEARTBEAT_MS = 5 * 60 * 1000;
-
-  function signatureStorageKey() {
-    return `${SIGNATURE_STORAGE_KEY}:${String(args.signature_scope || "default")}`;
-  }
-
-  function readDeliveredState() {
-    try {
-      const parsed = JSON.parse(window.sessionStorage.getItem(signatureStorageKey()) || "{}");
-      return {
-        signature: String(parsed.signature || ""),
-        deliveredAt: Number(parsed.deliveredAt || 0),
-      };
-    } catch (_) {
-      return { signature: "", deliveredAt: 0 };
-    }
-  }
-
-  function writeDeliveredState(signature, deliveredAt) {
-    try {
-      window.sessionStorage.setItem(
-        signatureStorageKey(),
-        JSON.stringify({ signature, deliveredAt })
-      );
-    } catch (_) {}
-  }
-
-  function send(type, data = {}) {
-    window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*");
-  }
-  function sendHostSyncState(state, detail = {}) {
-    window.parent.postMessage({
-      source: "ubike-browser-sync",
-      type: "ubike:sync-state",
-      state,
-      ...detail,
-    }, "*");
-  }
-  function setHeight() {
-    send("streamlit:setFrameHeight", { height: 1 });
-  }
-  function setValue(value) {
-    send("streamlit:setComponentValue", { value, dataType: "json" });
-  }
-  function setStatus(text, isError = false) {
-    statusNode.textContent = text || "";
-    statusNode.className = isError ? "error" : "";
-    setHeight();
-  }
-  function intOrNull(value) {
-    if (value === null || value === undefined || value === "") return null;
-    const number = Number(value);
-    return Number.isFinite(number) ? Math.max(0, Math.trunc(number)) : null;
-  }
-  function firstNonempty(...values) {
-    for (const value of values) {
-      if (value === null || value === undefined) continue;
-      if (typeof value === "string" && !value.trim()) continue;
-      return value;
-    }
-    return null;
-  }
-  function extractItems(payload) {
-    if (Array.isArray(payload)) return payload.filter(item => item && typeof item === "object");
-    if (!payload || typeof payload !== "object") return [];
-    const candidates = [payload.data, payload.result, payload.stations, payload.retVal];
-    for (const candidate of candidates) {
-      if (Array.isArray(candidate)) return candidate.filter(item => item && typeof item === "object");
-      if (candidate && typeof candidate === "object" && Array.isArray(candidate.data)) {
-        return candidate.data.filter(item => item && typeof item === "object");
-      }
-    }
-    return [];
-  }
-  function isTaitung(item) {
-    const locationText = [
-      item.county_tw, item.city_tw, item.scity, item.district_tw,
-      item.address_tw, item.name_tw, item.sarea, item.ar, item.sna
-    ].map(value => String(value || "")).join(" ").replaceAll("臺", "台");
-    if (locationText.includes("台東縣")) return true;
-    const lat = Number(firstNonempty(item.lat, item.latitude));
-    const lng = Number(firstNonempty(item.lng, item.longitude));
-    return Number.isFinite(lat) && Number.isFinite(lng)
-      && lat >= 21.85 && lat <= 23.60 && lng >= 120.70 && lng <= 122.20;
-  }
-  function sleep(milliseconds) {
-    return new Promise(resolve => setTimeout(resolve, Math.max(0, milliseconds)));
-  }
-  async function fetchJson(url, options = {}, maxAttempts = 3) {
-    let lastError = null;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 25000);
-      try {
-        const response = await fetch(url, {
-          cache: "no-store",
-          credentials: "omit",
-          ...options,
-          signal: controller.signal,
-        });
-        if (!response.ok) {
-          const error = new Error(`HTTP ${response.status}`);
-          error.status = response.status;
-          throw error;
-        }
-        const responseText = await response.text();
-        try { return JSON.parse(responseText); }
-        catch (_) { throw new Error("官網回傳的內容不是 JSON"); }
-      } catch (error) {
-        lastError = error;
-        const status = Number(error && error.status);
-        const retryable = error && (
-          error.name === "AbortError" || status === 429 || status >= 500 || !Number.isFinite(status)
-        );
-        if (!retryable || attempt >= maxAttempts) throw error;
-        // 加入少量隨機退避，避免多個並行請求在同一時間再次撞上官網限制。
-        await sleep(180 * attempt + Math.floor(Math.random() * 140));
-      } finally {
-        clearTimeout(timeout);
-      }
-    }
-    throw lastError || new Error("官網請求失敗");
-  }
-  function batched(values, size) {
-    const output = [];
-    for (let index = 0; index < values.length; index += size) output.push(values.slice(index, index + size));
-    return output;
-  }
-  function taipeiTimeText() {
-    return new Intl.DateTimeFormat("zh-TW", {
-      timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit",
-      hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
-    }).format(new Date()).replaceAll("-", "/");
-  }
-  function eventId() {
-    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") return globalThis.crypto.randomUUID();
-    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  }
-
-  function scheduleAutoSync() {
-    if (autoTimer !== null) {
-      clearTimeout(autoTimer);
-      autoTimer = null;
-    }
-    if (!args.auto_refresh) return;
-    const seconds = Math.max(5, Math.min(60, Number(args.auto_refresh_seconds || 60)));
-    autoTimer = setTimeout(() => {
-      autoTimer = null;
-      if (busy) scheduleAutoSync();
-      else runSync();
-    }, seconds * 1000);
-  }
-
-  async function runSync({ forceDelivery = false } = {}) {
-    if (busy) return;
-    if (autoTimer !== null) {
-      clearTimeout(autoTimer);
-      autoTimer = null;
-    }
-    busy = true;
-    const startedAt = performance.now();
-    sendHostSyncState("busy");
-    button.disabled = true;
-    button.textContent = "⏳ 正在高速分批讀取 YouBike 官網……";
-    setStatus("將以最大批次、有限並行及只補漏站的方式取得資料，不經 TDX。", false);
-
-    try {
-      const catalogUrl = args.catalog_url || "https://apis.youbike.com.tw/json/station-min-yb2.json";
-      const parkingUrl = args.parking_url || "https://apis.youbike.com.tw/tw2/parkingInfo";
-      const batchSize = Math.max(1, Math.min(50, Number(args.batch_size || 20)));
-      const concurrency = Math.max(1, Math.min(6, Number(args.request_concurrency || 4)));
-      const maxBatchRounds = Math.max(1, Math.min(8, Number(args.max_batch_rounds || 4)));
-      const maxSingleRounds = Math.max(0, Math.min(4, Number(args.max_single_rounds || 2)));
-      const waveDelayMs = Math.max(0, Math.min(1000, Number(args.wave_delay_ms || 70)));
-
-      const catalogPayload = await fetchJson(catalogUrl, {
-        method: "GET",
-        headers: { "Accept": "application/json, text/plain, */*" },
-      });
-      const catalog = extractItems(catalogPayload).filter(isTaitung).map(item => {
-        const stationId = String(firstNonempty(item.station_no, item.sno, item.station_id) || "").trim();
-        const stationName = String(firstNonempty(item.name_tw, item.sna, item.station_name) || "").trim();
-        return {
-          station_uid: stationId,
-          station_id: stationId,
-          station_name: stationName,
-          service_status: intOrNull(firstNonempty(item.status, item.act, 1)) ?? 1,
-          source_update_time: String(firstNonempty(item.updated_at, item.mday, item.time) || "").trim(),
-          latitude: firstNonempty(item.lat, item.latitude),
-          longitude: firstNonempty(item.lng, item.longitude),
-        };
-      }).filter(item => item.station_id && item.station_name);
-
-      if (!catalog.length) throw new Error("官網站點清單中找不到臺東候選場站");
-
-      const requestedStationIds = [...new Set(catalog.map(item => item.station_id))];
-      const requestedStationIdSet = new Set(requestedStationIds);
-      const parkingMap = new Map();
-      let requestCount = 0;
-      let failedRequestCount = 0;
-      let batchRoundCount = 0;
-      let singleRoundCount = 0;
-
-      function stationIdOf(item) {
-        return String(firstNonempty(item && item.station_no, item && item.sno) || "").trim();
-      }
-
-      function mergeParkingItems(items) {
-        let addedCount = 0;
-        for (const item of items) {
-          const stationId = stationIdOf(item);
-          if (!stationId || !requestedStationIdSet.has(stationId)) continue;
-          if (!parkingMap.has(stationId)) addedCount += 1;
-          parkingMap.set(stationId, item);
-        }
-        return addedCount;
-      }
-
-      function currentMissingIds() {
-        return requestedStationIds.filter(stationId => !parkingMap.has(stationId));
-      }
-
-      async function requestParkingGroup(stationIds) {
-        const payload = await fetchJson(parkingUrl, {
-          method: "POST",
-          headers: {
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json;charset=UTF-8",
-          },
-          body: JSON.stringify({ station_no: stationIds }),
-        });
-        return extractItems(payload);
-      }
-
-      async function runGroups(groups, phaseText, workerLimit = concurrency) {
-        if (!groups.length) return { addedCount: 0, failedGroups: [] };
-        let nextIndex = 0;
-        let addedCount = 0;
-        let completedCount = 0;
-        const failedGroups = [];
-
-        async function worker() {
-          while (true) {
-            const index = nextIndex;
-            nextIndex += 1;
-            if (index >= groups.length) return;
-            const stationIds = groups[index];
-            try {
-              requestCount += 1;
-              const items = await requestParkingGroup(stationIds);
-              addedCount += mergeParkingItems(items);
-            } catch (error) {
-              failedRequestCount += 1;
-              failedGroups.push({ stationIds, error: String(error && error.message ? error.message : error) });
-            } finally {
-              completedCount += 1;
-              const missingCount = currentMissingIds().length;
-              setStatus(
-                `${phaseText}：完成 ${completedCount}／${groups.length} 批，已取得 ` +
-                `${parkingMap.size}／${requestedStationIds.length} 站，尚缺 ${missingCount} 站`,
-                false,
-              );
-            }
-          }
-        }
-
-        const workerCount = Math.min(Math.max(1, workerLimit), groups.length);
-        await Promise.all(Array.from({ length: workerCount }, () => worker()));
-        return { addedCount, failedGroups };
-      }
-
-      let missingStationIds = currentMissingIds();
-      let previousMissingCount = missingStationIds.length + 1;
-
-      // 主階段：每一輪都使用設定的最大批次，並行查完後只保留仍缺少的場站進入下一輪。
-      for (let round = 1; round <= maxBatchRounds && missingStationIds.length; round += 1) {
-        batchRoundCount = round;
-        const groups = batched(missingStationIds, batchSize);
-        setStatus(
-          `高速批次第 ${round} 輪：${missingStationIds.length} 站，分成 ${groups.length} 批並行讀取……`,
-          false,
-        );
-        const result = await runGroups(groups, `高速批次第 ${round} 輪`);
-        missingStationIds = currentMissingIds();
-
-        if (!missingStationIds.length) break;
-        // 這一輪完全沒有新增資料時，繼續重送相同批次沒有速度效益，立即改走單站補查。
-        if (result.addedCount <= 0 || missingStationIds.length >= previousMissingCount) break;
-        previousMissingCount = missingStationIds.length;
-        if (waveDelayMs) await sleep(waveDelayMs);
-      }
-
-      // 最後階段：只對殘留漏站做單站並行查詢，避免一個異常站拖累同批其他場站。
-      missingStationIds = currentMissingIds();
-      for (let round = 1; round <= maxSingleRounds && missingStationIds.length; round += 1) {
-        singleRoundCount = round;
-        const singleGroups = missingStationIds.map(stationId => [stationId]);
-        setStatus(
-          `單站補查第 ${round} 輪：正在並行補齊最後 ${missingStationIds.length} 個場站……`,
-          false,
-        );
-        const beforeCount = parkingMap.size;
-        await runGroups(singleGroups, `單站補查第 ${round} 輪`, Math.min(6, concurrency + 1));
-        missingStationIds = currentMissingIds();
-        if (!missingStationIds.length) break;
-        // 即使這一輪暫時沒有新增，也保留後續重試機會；官網可能只是短暫漏回或限流。
-        const noProgressDelay = parkingMap.size <= beforeCount ? 260 * round : waveDelayMs + 60;
-        if (noProgressDelay) await sleep(noProgressDelay);
-      }
-
-      const sourceTimes = [];
-      const records = [];
-      for (const station of catalog) {
-        const parking = parkingMap.get(station.station_id);
-        if (!parking) continue;
-        let detail = firstNonempty(parking.available_spaces_detail, parking.sbi_detail);
-        if (!detail || typeof detail !== "object") detail = {};
-        const sourceTime = String(firstNonempty(
-          parking.updated_at, parking.mday, parking.time, station.source_update_time
-        ) || "").trim();
-        if (sourceTime) sourceTimes.push(sourceTime);
-        records.push({
-          ...station,
-          service_status: intOrNull(firstNonempty(parking.status, parking.act, station.service_status, 1)) ?? 1,
-          general_bikes: intOrNull(detail.yb2),
-          electric_bikes: intOrNull(detail.eyb),
-          available_spaces: intOrNull(firstNonempty(parking.available_spaces, parking.sbi)),
-          empty_spaces: intOrNull(firstNonempty(parking.empty_spaces, parking.bemp)),
-          parking_spaces: intOrNull(firstNonempty(parking.parking_spaces, parking.tot)),
-          source_update_time: sourceTime,
-        });
-      }
-
-      if (!records.length) throw new Error("官網沒有回傳臺東場站即時車數");
-      missingStationIds = currentMissingIds();
-
-      // 每次仍照常向官網取得資料；只有車數／營運狀態／漏站清單真的變動時，
-      // 才把值送回 Streamlit 觸發整頁重算。資料完全相同時最多五分鐘送一次心跳。
-      const signature = records
-        .map(record => [
-          record.station_id,
-          record.general_bikes ?? "",
-          record.electric_bikes ?? "",
-          record.empty_spaces ?? "",
-          record.parking_spaces ?? "",
-          record.service_status ?? "",
-        ].join(":"))
-        .join("|") + `|missing:${missingStationIds.join(",")}`;
-      const deliveredState = readDeliveredState();
-      const nowMilliseconds = Date.now();
-      const shouldDeliver = (
-        forceDelivery
-        || Boolean(args.force_initial_delivery)
-        || signature !== deliveredState.signature
-        || nowMilliseconds - deliveredState.deliveredAt >= UNCHANGED_HEARTBEAT_MS
-      );
-
-      if (shouldDeliver) {
-        setValue({
-          ok: true,
-          event_id: eventId(),
-          records,
-          fetched_at: taipeiTimeText(),
-          latest_source_time: sourceTimes.length ? sourceTimes.sort().at(-1) : "",
-          station_count: records.length,
-          requested_station_count: requestedStationIds.length,
-          missing_station_count: missingStationIds.length,
-          missing_station_ids: missingStationIds,
-          request_batch_count: requestCount,
-          request_count: requestCount,
-          failed_request_count: failedRequestCount,
-          batch_round_count: batchRoundCount,
-          single_round_count: singleRoundCount,
-          batch_size: batchSize,
-          request_concurrency: concurrency,
-          elapsed_ms: Math.max(0, Math.round(performance.now() - startedAt)),
-          source: "YouBike 官網公開接口（高速循環補查，由使用者瀏覽器直接取得，免 TDX）",
-        });
-        writeDeliveredState(signature, nowMilliseconds);
-      }
-
-      const missingText = missingStationIds.length ? `，仍缺 ${missingStationIds.length} 個` : "，已全數取得";
-      const deliveryText = shouldDeliver
-        ? "，資料有更新，正在寫入分析系統……"
-        : "，車數無變化，已略過整頁重算";
-      setStatus(
-        `已取得 ${records.length}／${requestedStationIds.length} 個場站${missingText}，共送出 ${requestCount} 次請求${deliveryText}`,
-        false,
-      );
-      sendHostSyncState("success", { station_count: records.length, changed: shouldDeliver });
-    } catch (error) {
-      const message = error && error.name === "AbortError"
-        ? "連線逾時，請檢查手機網路後再試"
-        : String(error && error.message ? error.message : error);
-      setValue({ ok: false, event_id: eventId(), error: message });
-      setStatus(`同步失敗：${message}`, true);
-      sendHostSyncState("error", { message });
-    } finally {
-      busy = false;
-      button.disabled = false;
-      button.textContent = args.button_label || "🔄 由手機／瀏覽器取得 YouBike 即時車數";
-      setHeight();
-      scheduleAutoSync();
-    }
-  }
-
-  button.addEventListener("click", () => runSync({ forceDelivery: true }));
-  window.addEventListener("message", event => {
-    if (!event.data) return;
-    if (event.data.type === "ubike:manual-sync") {
-      runSync({ forceDelivery: true });
-      return;
-    }
-    if (event.data.type !== "streamlit:render") return;
-    args = event.data.args || {};
-    button.textContent = args.button_label || "🔄 手動更新即時車數";
-    button.disabled = Boolean(event.data.disabled) || busy;
-    scheduleAutoSync();
-    setHeight();
-  });
-
-  send("streamlit:componentReady", { apiVersion: API_VERSION });
-  setHeight();
-})();
-</script>
-</body>
-</html>
-"""
-
-
-_YOUBIKE_BROWSER_SYNC_COMPONENT = None
-
-
-def get_youbike_browser_sync_component():
-    """建立雙向 Streamlit 元件，讓請求從使用者瀏覽器發出以避開雲端主機 503。"""
-    global _YOUBIKE_BROWSER_SYNC_COMPONENT
-    if _YOUBIKE_BROWSER_SYNC_COMPONENT is not None:
-        return _YOUBIKE_BROWSER_SYNC_COMPONENT
-
-    component_dir = Path(tempfile.gettempdir()) / "youbike_browser_sync_component_v2"
-    component_dir.mkdir(parents=True, exist_ok=True)
-    index_path = component_dir / "index.html"
-    try:
-        if not index_path.exists() or index_path.read_text(encoding="utf-8") != YOUBIKE_BROWSER_COMPONENT_HTML:
-            index_path.write_text(YOUBIKE_BROWSER_COMPONENT_HTML, encoding="utf-8")
-    except OSError as exc:
-        raise YouBikeDataError(f"無法建立瀏覽器同步元件：{exc}") from exc
-
-    _YOUBIKE_BROWSER_SYNC_COMPONENT = components.declare_component(
-        "youbike_browser_sync_v2",
-        path=str(component_dir),
-    )
-    return _YOUBIKE_BROWSER_SYNC_COMPONENT
-
-
-def normalize_browser_live_payload(payload) -> dict:
-    """驗證瀏覽器回傳資料並補齊 Python 端配對所需欄位。"""
+def normalize_server_live_payload(payload) -> dict:
+    """驗證 Server 回傳資料並補齊既有配對流程所需欄位。"""
     if not isinstance(payload, dict):
-        raise YouBikeDataError("瀏覽器沒有回傳有效資料。")
+        raise YouBikeDataError("Server 沒有回傳有效資料。")
     if not payload.get("ok"):
-        raise YouBikeDataError(str(payload.get("error") or "瀏覽器同步失敗。"))
+        raise YouBikeDataError(str(payload.get("error") or "Server 同步失敗。"))
 
     raw_records = payload.get("records")
     if not isinstance(raw_records, list):
-        raise YouBikeDataError("瀏覽器回傳的場站資料格式不正確。")
+        raise YouBikeDataError("Server 回傳的場站資料格式不正確。")
 
     records: list[dict] = []
     for raw_record in raw_records:
@@ -1336,7 +850,7 @@ def normalize_browser_live_payload(payload) -> dict:
         )
 
     if not records:
-        raise YouBikeDataError("瀏覽器沒有回傳可用的臺東場站即時車數。")
+        raise YouBikeDataError("Server 沒有回傳可用的場站即時車數。")
 
     return {
         "records": records,
@@ -1357,131 +871,9 @@ def normalize_browser_live_payload(payload) -> dict:
             str(value).strip() for value in payload.get("missing_station_ids", [])
             if str(value).strip()
         ] if isinstance(payload.get("missing_station_ids"), list) else [],
-        "source": str(payload.get("source") or "YouBike 官網公開接口（高速循環補查，由瀏覽器直接取得，免 TDX）"),
+        "source": str(payload.get("source") or "YouBike 官網公開接口（Python Server 共用快取）"),
         "event_id": str(payload.get("event_id") or "").strip(),
     }
-
-
-def _first_nonempty(*values):
-    """回傳第一個不是 None／空字串的值。"""
-    for value in values:
-        if value is None:
-            continue
-        if isinstance(value, str) and not value.strip():
-            continue
-        return value
-    return None
-
-
-def _youbike_http_json(
-    url: str,
-    *,
-    method: str = "GET",
-    json_body: dict | None = None,
-):
-    """讀取 YouBike 官網公開 JSON；免 TDX、免帳號、免 API 金鑰。"""
-    request_headers = {
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.7",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/126.0 Safari/537.36"
-        ),
-        "Referer": "https://www.youbike.com.tw/region/taitung/stations/",
-        "Origin": "https://www.youbike.com.tw",
-    }
-
-    encoded_body = None
-    if json_body is not None:
-        encoded_body = json.dumps(json_body, ensure_ascii=False).encode("utf-8")
-        request_headers["Content-Type"] = "application/json;charset=UTF-8"
-
-    last_error: Exception | None = None
-    for attempt in range(1, YOUBIKE_HTTP_MAX_ATTEMPTS + 1):
-        request = Request(
-            url,
-            data=encoded_body,
-            headers=request_headers,
-            method=method,
-        )
-
-        try:
-            with urlopen(request, timeout=YOUBIKE_REQUEST_TIMEOUT_SECONDS) as response:
-                raw_body = response.read().decode("utf-8-sig")
-
-            try:
-                payload = json.loads(raw_body)
-            except json.JSONDecodeError as exc:
-                raise YouBikeDataError("YouBike 官網回傳內容不是有效的 JSON。") from exc
-
-            if isinstance(payload, dict):
-                ret_code = payload.get("retCode")
-                if ret_code not in (None, 1, "1", True):
-                    ret_message = str(payload.get("retMsg") or "官方資料服務回傳失敗").strip()
-                    raise YouBikeDataError(f"YouBike 官網資料服務錯誤：{ret_message}")
-            return payload
-
-        except HTTPError as exc:
-            last_error = exc
-            try:
-                detail = exc.read().decode("utf-8", errors="replace")[:240]
-            except Exception:
-                detail = ""
-
-            # 429 與 5xx 通常是暫時性錯誤，先短暫退避後自動重試。
-            if exc.code == 429 or 500 <= exc.code <= 599:
-                if attempt < YOUBIKE_HTTP_MAX_ATTEMPTS:
-                    time.sleep(0.8 * attempt)
-                    continue
-                if exc.code == 429:
-                    raise YouBikeDataError(
-                        "官方資料請求過於頻繁，請等候約 1 分鐘再試。"
-                    ) from exc
-
-            if exc.code in (401, 403):
-                raise YouBikeDataError(
-                    "YouBike 官網暫時拒絕此主機連線，請稍後再試。"
-                ) from exc
-            raise YouBikeDataError(
-                f"YouBike 官網資料回傳 HTTP {exc.code}。{detail or '請稍後再試。'}"
-            ) from exc
-        except (URLError, TimeoutError) as exc:
-            last_error = exc
-            if attempt < YOUBIKE_HTTP_MAX_ATTEMPTS:
-                time.sleep(0.8 * attempt)
-                continue
-
-    if isinstance(last_error, URLError):
-        reason = getattr(last_error, "reason", last_error)
-        raise YouBikeDataError(f"無法連線至 YouBike 官網資料服務：{reason}") from last_error
-    if isinstance(last_error, TimeoutError):
-        raise YouBikeDataError("連線 YouBike 官網資料服務逾時，請稍後重試。") from last_error
-    raise YouBikeDataError("YouBike 官網資料服務暫時無法使用，請稍後重試。")
-
-
-def _extract_youbike_station_items(payload) -> list[dict]:
-    """相容清單陣列、data 包裝，以及 retVal.data 等常見官方格式。"""
-    containers = [payload]
-    if isinstance(payload, dict):
-        containers.append(payload.get("retVal"))
-
-    for container in containers:
-        if isinstance(container, list):
-            return [item for item in container if isinstance(item, dict)]
-        if not isinstance(container, dict):
-            continue
-        for key in ("data", "result", "stations", "retVal"):
-            values = container.get(key)
-            if isinstance(values, list):
-                return [item for item in values if isinstance(item, dict)]
-            if isinstance(values, dict):
-                nested_data = values.get("data")
-                if isinstance(nested_data, list):
-                    return [item for item in nested_data if isinstance(item, dict)]
-    return []
 
 
 @lru_cache(maxsize=8192)
@@ -1514,171 +906,6 @@ def _youbike_station_similarity(excel_name: str, api_name: str) -> float:
     ):
         return 0.96
     return SequenceMatcher(None, excel_key, api_key, autojunk=False).ratio()
-
-
-def _looks_like_taitung_station(record: dict) -> bool:
-    """以官方欄位及經緯度範圍篩出臺東縣候選場站。"""
-    location_text = " ".join(
-        str(record.get(key) or "")
-        for key in (
-            "county_tw", "city_tw", "scity", "district_tw", "address_tw",
-            "name_tw", "sarea", "ar", "sna",
-        )
-    ).replace("臺", "台")
-    if "台東縣" in location_text:
-        return True
-
-    try:
-        latitude = float(_first_nonempty(record.get("lat"), record.get("latitude")))
-        longitude = float(_first_nonempty(record.get("lng"), record.get("longitude")))
-    except (TypeError, ValueError):
-        return False
-
-    # 包含臺東本島、綠島與蘭嶼。後續仍會以場站名稱做一對一安全配對。
-    return 21.85 <= latitude <= 23.60 and 120.70 <= longitude <= 122.20
-
-
-@st.cache_data(show_spinner=False, ttl=21600, max_entries=4)
-def fetch_youbike_taitung_station_catalog() -> list[dict]:
-    """取得 YouBike 全臺站點清單並留下臺東縣候選場站。"""
-    payload = _youbike_http_json(YOUBIKE_STATION_CATALOG_URL)
-    items = _extract_youbike_station_items(payload)
-    records: list[dict] = []
-
-    for item in items:
-        if not _looks_like_taitung_station(item):
-            continue
-        station_no = str(
-            _first_nonempty(item.get("station_no"), item.get("sno"), item.get("station_id"))
-            or ""
-        ).strip()
-        station_name = str(
-            _first_nonempty(item.get("name_tw"), item.get("sna"), item.get("station_name"))
-            or ""
-        ).strip()
-        if not station_no or not station_name:
-            continue
-
-        raw_status = _first_nonempty(item.get("status"), item.get("act"), 1)
-        records.append(
-            {
-                "station_uid": station_no,
-                "station_id": station_no,
-                "station_name": station_name,
-                "station_key": normalize_youbike_station_key(station_name),
-                "service_status": safe_nonnegative_int(raw_status),
-                "source_update_time": str(
-                    _first_nonempty(item.get("updated_at"), item.get("mday"), item.get("time"))
-                    or ""
-                ).strip(),
-                "latitude": _first_nonempty(item.get("lat"), item.get("latitude")),
-                "longitude": _first_nonempty(item.get("lng"), item.get("longitude")),
-            }
-        )
-
-    if not records:
-        raise YouBikeDataError("YouBike 官網沒有回傳可辨識的臺東場站清單。")
-    return records
-
-
-def _batched_station_numbers(station_numbers: list[str]):
-    """將場站編號分批，避免單次 POST 過大而被官方服務拒絕。"""
-    for start_index in range(0, len(station_numbers), YOUBIKE_STATION_BATCH_SIZE):
-        yield station_numbers[start_index : start_index + YOUBIKE_STATION_BATCH_SIZE]
-
-
-@st.cache_data(show_spinner=False, ttl=60, max_entries=8)
-def fetch_youbike_taitung_bike_data(refresh_bucket: int) -> dict:
-    """取得臺東縣 YouBike 2.0／2.0E 即時可借車數；完全不使用 TDX。"""
-    del refresh_bucket  # 讓快取依傳入分鐘批次更新，同分鐘內避免重複打官方接口。
-    catalog = fetch_youbike_taitung_station_catalog()
-    station_numbers = [record["station_id"] for record in catalog]
-
-    parking_items: list[dict] = []
-    station_batches = list(_batched_station_numbers(station_numbers))
-    for batch_index, station_batch in enumerate(station_batches):
-        payload = _youbike_http_json(
-            YOUBIKE_PARKING_INFO_URL,
-            method="POST",
-            json_body={"station_no": station_batch},
-        )
-        parking_items.extend(_extract_youbike_station_items(payload))
-        if batch_index < len(station_batches) - 1:
-            time.sleep(0.15)
-
-    parking_by_station = {
-        str(_first_nonempty(item.get("station_no"), item.get("sno")) or "").strip(): item
-        for item in parking_items
-        if str(_first_nonempty(item.get("station_no"), item.get("sno")) or "").strip()
-    }
-
-    records: list[dict] = []
-    source_times: list[str] = []
-    for station in catalog:
-        parking = parking_by_station.get(station["station_id"])
-        if not isinstance(parking, dict):
-            continue
-
-        detail = _first_nonempty(
-            parking.get("available_spaces_detail"),
-            parking.get("sbi_detail"),
-        )
-        if not isinstance(detail, dict):
-            detail = {}
-
-        general_bikes = normalize_current_status(detail.get("yb2"))
-        electric_bikes = normalize_current_status(detail.get("eyb"))
-        source_update_time = str(
-            _first_nonempty(
-                parking.get("updated_at"),
-                parking.get("mday"),
-                parking.get("time"),
-                station.get("source_update_time"),
-            )
-            or ""
-        ).strip()
-        if source_update_time:
-            source_times.append(source_update_time)
-
-        raw_service_status = _first_nonempty(
-            parking.get("status"),
-            parking.get("act"),
-            station.get("service_status"),
-            1,
-        )
-        records.append(
-            {
-                **station,
-                "service_status": safe_nonnegative_int(raw_service_status),
-                "general_bikes": general_bikes,
-                "electric_bikes": electric_bikes,
-                "available_spaces": normalize_current_status(
-                    _first_nonempty(parking.get("available_spaces"), parking.get("sbi"))
-                ),
-                "empty_spaces": normalize_current_status(
-                    _first_nonempty(parking.get("empty_spaces"), parking.get("bemp"))
-                ),
-                "parking_spaces": normalize_current_status(
-                    _first_nonempty(parking.get("parking_spaces"), parking.get("tot"))
-                ),
-                "source_update_time": source_update_time,
-            }
-        )
-
-    if not records:
-        raise YouBikeDataError(
-            "YouBike 官網沒有回傳臺東場站即時車數，可能是官方資料服務暫時異常。"
-        )
-
-    fetched_at = datetime.now(TAIPEI_TIMEZONE).strftime("%Y/%m/%d %H:%M:%S")
-    return {
-        "records": records,
-        "fetched_at": fetched_at,
-        "latest_source_time": max(source_times) if source_times else "",
-        "station_count": len(records),
-        "request_batch_count": len(station_batches),
-        "source": "YouBike 官網公開接口（免 TDX）",
-    }
 
 
 def build_youbike_match_index(live_records: list[dict]) -> dict[str, object]:
@@ -2492,7 +1719,7 @@ def render_app_hero() -> None:
         <section class="dispatch-hero">
           <div class="dispatch-hero-copy">
             <div class="dispatch-kicker">TAITUNG · SMART DISPATCH</div>
-            <div id="jarvis-secret-trigger" class="dispatch-version-badge" title="">測試版</div>
+            <div id="jarvis-secret-trigger" class="dispatch-version-badge" title="">{html.escape(APP_VERSION_NAME)}</div>
             <h1>臺東 YouBike 智慧調度</h1>
             <p>配置、即時車數、分析與依實際道路路網計算的 AI 路線，集中在同一套工作流程。</p>
           </div>
@@ -3141,11 +2368,11 @@ def _build_floating_station_search_html(
                         if (!frame.contentWindow) continue;
                         const frameTitle = String(frame.getAttribute("title") || "").toLowerCase();
                         const frameSource = String(frame.getAttribute("src") || "").toLowerCase();
-                        let isSyncFrame = frameTitle.includes("youbike_browser_sync")
-                            || frameSource.includes("youbike_browser_sync");
+                        let isSyncFrame = frameTitle.includes("youbike_server_sync")
+                            || frameSource.includes("youbike_server_sync");
                         try {{
                             isSyncFrame = isSyncFrame
-                                || Boolean(frame.contentDocument?.getElementById("syncButton"));
+                                || Boolean(frame.contentDocument?.getElementById("serverSyncButton"));
                         }} catch (_accessError) {{
                             // 跨來源時改以 title／src 判斷。
                         }}
@@ -3330,7 +2557,7 @@ def _build_floating_station_search_html(
             }}
             win.__ubikeSyncStateHandler = (event) => {{
                 const data = event.data || {{}};
-                if (data.source !== "ubike-browser-sync" || data.type !== "ubike:sync-state") return;
+                if (data.source !== "ubike-server-sync" || data.type !== "ubike:sync-state") return;
                 if (data.state === "busy") {{
                     setRefreshButtonState(true);
                     return;
@@ -4411,7 +3638,7 @@ DISPATCH_GEOLOCATION_COMPONENT_HTML = r"""<!doctype html>
 _DISPATCH_GEOLOCATION_COMPONENT = None
 
 
-# V30：電池／柱號資料一律由 Python Server 的 battery_service.py 取得。
+# V29 正式版：電池／柱號資料一律由 Python Server 的 battery_service.py 取得。
 # 保留一個空白腳本佔位，讓舊賈維斯元件模板可以相容，但瀏覽器不再 fetch YouBike Battery API。
 LOW_BATTERY_CLIENT_CORE_JS = ""
 
@@ -5227,29 +4454,29 @@ _JARVIS_VOICE_COMPONENT = None
 
 
 def get_jarvis_voice_component():
-    """建立隱藏式賈維斯語音元件；V30 不再把 YouBike fetch 邏輯送到瀏覽器。"""
+    """建立隱藏式賈維斯語音元件；V29 正式版不再把 YouBike 查詢送到瀏覽器。"""
     global _JARVIS_VOICE_COMPONENT
     if _JARVIS_VOICE_COMPONENT is not None:
         return _JARVIS_VOICE_COMPONENT
-    component_dir = Path(tempfile.gettempdir()) / "ai_ubike_jarvis_voice_component_v30"
+    component_dir = Path(tempfile.gettempdir()) / "ai_ubike_jarvis_voice_component_v29"
     component_dir.mkdir(parents=True, exist_ok=True)
     index_path = component_dir / "index.html"
-    # 模板仍保留舊 placeholder，但 V30 注入的是無網路請求的相容 stub。
-    client_stub = "function ensureUbikeBatteryService(win){return {version:'server-v30'};}"
+    # 模板仍保留舊 placeholder，但 V29 正式版注入的是無網路請求的相容 stub。
+    client_stub = "function ensureUbikeBatteryService(win){return {version:'server-v29'};}"
     content = JARVIS_BROWSER_COMPONENT_HTML.replace("__LOW_BATTERY_CLIENT_CORE__", client_stub)
     try:
         if not index_path.exists() or index_path.read_text(encoding="utf-8") != content:
             index_path.write_text(content, encoding="utf-8")
     except OSError as exc:
         raise RuntimeError(f"無法建立賈維斯語音元件：{exc}") from exc
-    _JARVIS_VOICE_COMPONENT = components.declare_component("ai_ubike_jarvis_voice_v30", path=str(component_dir))
+    _JARVIS_VOICE_COMPONENT = components.declare_component("ai_ubike_jarvis_voice_v29", path=str(component_dir))
     return _JARVIS_VOICE_COMPONENT
 
 
 
 @st.cache_data(show_spinner=False, max_entries=192)
 def _build_inline_low_battery_pillars_html(*args, **kwargs) -> str:
-    """V30 相容占位；實際渲染已移到 battery_components.py。"""
+    """V29 相容占位；實際渲染已移到 battery_components.py。"""
     return ""
 
 
@@ -5262,7 +4489,7 @@ def render_inline_low_battery_pillars(
     auto_query: bool,
     force_station: str = "",
 ) -> None:
-    """V30：柱號改由 Python Server 查詢，共用快取；瀏覽器只顯示結果。"""
+    """V29 正式版：柱號由 Python Server 查詢，共用快取；瀏覽器只顯示結果。"""
     render_inline_server_battery(
         station_specs,
         threshold=threshold,
@@ -5275,7 +4502,7 @@ def render_inline_low_battery_pillars(
 
 @st.cache_data(show_spinner=False, max_entries=32)
 def _build_floating_battery_query_html(*args, **kwargs) -> str:
-    """V30 相容占位；實際渲染已移到 battery_components.py。"""
+    """V29 相容占位；實際渲染已移到 battery_components.py。"""
     return ""
 
 
@@ -5283,7 +4510,7 @@ def render_floating_battery_query(
     route_station_map: dict[str, list[dict]],
     mobile_mode: bool,
 ) -> None:
-    """V30：懸浮電量查詢由 Python Server 查 YouBike，所有使用者共用快取。"""
+    """V29 正式版：懸浮電量查詢由 Python Server 查 YouBike，所有使用者共用快取。"""
     render_floating_server_battery(
         route_station_map,
         mobile_mode,
@@ -7217,7 +6444,7 @@ def render_jarvis_voice_assistant(
     context_status: str = "ready",
     context_message: str = "",
 ) -> dict | None:
-    """賈維斯沿用智慧調度 context；V30 電池資料先由 Server 查好再送到瀏覽器。"""
+    """賈維斯沿用智慧調度 context；V29 電池資料先由 Server 查好再送到瀏覽器。"""
     if mode not in {"candidate", "active"}:
         return None
 
@@ -9323,7 +8550,7 @@ if cache_expired:
 
 with st.sidebar:
     st.header("配置")
-    st.caption("系統版本：測試版")
+    st.caption(f"系統版本：{APP_VERSION_NAME}｜建置日期：{APP_BUILD_DATE}")
 
     if st.session_state.pop("base_expired_notice", False):
         st.warning("原配置無法讀取，請重新上傳。")
@@ -9381,7 +8608,7 @@ if not options:
     st.error("找不到可使用的區域配置。請確認可見工作表中包含『場站名稱』與區域標記。")
     st.stop()
 
-# V30：區域來源改由 Excel 自動發現。台東會是 D1/D2/D3；外縣市可使用自己的區域代碼。
+# V29 正式版：區域來源由 Excel 自動發現。台東會是 D1/D2/D3；外縣市可使用自己的區域代碼。
 discovered_zone_names: list[str] = []
 _seen_zone_names: set[str] = set()
 for _sheet_name, _route_name in options:
@@ -9549,36 +8776,68 @@ with st.expander("即時資料狀態與配對明細", expanded=False):
         "目的地一旦同意前往會保持鎖定，不會因即時數據變動自行換站。"
     )
 
-    browser_payload = None
+    live_station_specs = [
+        {
+            "name": str(station_name or "").strip(),
+            "district": str(district or "").strip(),
+        }
+        for station_name, district in base_df.reindex(
+            columns=["場站名稱", "行政區"]
+        ).itertuples(index=False, name=None)
+        if str(station_name or "").strip()
+    ]
+    server_sync_state_key = f"server_youbike_sync_state::{current_context_key}"
+    server_sync_state = st.session_state.get(server_sync_state_key)
+    if not isinstance(server_sync_state, dict):
+        server_sync_state = {"status": "", "station_count": 0, "error": ""}
+
+    server_sync_event = render_server_sync_trigger(
+        key=f"server_youbike_sync::{current_context_key}",
+        last_status=str(server_sync_state.get("status") or ""),
+        station_count=safe_nonnegative_int(server_sync_state.get("station_count")),
+        error_message=str(server_sync_state.get("error") or ""),
+        auto_refresh_seconds=60,
+    )
+    server_event_nonce = ""
+    new_server_sync_event = False
+    force_live_refresh = False
+    if isinstance(server_sync_event, dict) and server_sync_event.get("action") == "refresh":
+        server_event_nonce = str(server_sync_event.get("nonce") or "").strip()
+        processed_nonce_key = f"processed_server_sync_nonce::{current_context_key}"
+        if server_event_nonce and st.session_state.get(processed_nonce_key) != server_event_nonce:
+            st.session_state[processed_nonce_key] = server_event_nonce
+            new_server_sync_event = True
+            force_live_refresh = bool(server_sync_event.get("force"))
+
+    browser_payload = None  # 沿用下方既有資料驗證與寫入流程；資料來源已改為 Python Server。
     try:
-        browser_sync_component = get_youbike_browser_sync_component()
-        browser_payload = browser_sync_component(
-            catalog_url=YOUBIKE_STATION_CATALOG_URL,
-            parking_url=YOUBIKE_PARKING_INFO_URL,
-            # 第一輪每次最多查 20 站，最多 4 個請求並行；後續只重查漏站。
-            batch_size=20,
-            request_concurrency=4,
-            max_batch_rounds=8,
-            max_single_rounds=3,
-            wave_delay_ms=70,
-            button_label="🔄 手動更新即時車數",
-            auto_refresh=True,
-            auto_refresh_seconds=60,
-            signature_scope=active_base["token"],
-            force_initial_delivery=not bool(
-                isinstance(previous_live_meta, dict) and previous_live_meta.get("fetched_at")
-            ),
-            key=f"browser_youbike_sync::{current_context_key}",
-            default=None,
+        browser_payload = get_live_status_for_stations(
+            live_station_specs,
+            force=force_live_refresh,
         )
-    except YouBikeDataError as exc:
-        st.error(f"瀏覽器同步元件建立失敗：{exc}")
+        if browser_payload.get("cache_source") == "stale_cache":
+            st.warning(
+                "⚠️ 即時更新失敗，目前顯示 "
+                f"{safe_nonnegative_int(browser_payload.get('age_seconds'))} 秒前資料。"
+            )
+        server_sync_state = {
+            "status": "success",
+            "station_count": safe_nonnegative_int(browser_payload.get("station_count")),
+            "error": "",
+        }
+        st.session_state[server_sync_state_key] = server_sync_state
+    except LiveStatusServiceError as exc:
+        server_sync_state = {"status": "error", "station_count": 0, "error": str(exc)}
+        st.session_state[server_sync_state_key] = server_sync_state
+        st.error(f"YouBike Server 同步失敗：{exc}")
     except Exception as exc:
-        st.error(f"瀏覽器同步元件發生未預期錯誤：{exc}")
+        server_sync_state = {"status": "error", "station_count": 0, "error": str(exc)}
+        st.session_state[server_sync_state_key] = server_sync_state
+        st.error(f"YouBike Server 同步發生未預期錯誤：{exc}")
 
     if isinstance(browser_payload, dict):
         browser_event_id = str(browser_payload.get("event_id") or "").strip()
-        processed_event_key = f"processed_browser_youbike_event::{current_context_key}"
+        processed_event_key = f"processed_server_youbike_event::{current_context_key}"
         already_processed = bool(
             browser_event_id
             and st.session_state.get(processed_event_key) == browser_event_id
@@ -9590,8 +8849,8 @@ with st.expander("即時資料狀態與配對明細", expanded=False):
                     # 先登記事件，避免 Streamlit 元件保留上次回傳值時重複寫入。
                     st.session_state[processed_event_key] = browser_event_id
 
-                with st.spinner("正在配對臺東場站名稱並寫入 2.0／2.0E 現況……"):
-                    live_payload = normalize_browser_live_payload(browser_payload)
+                with st.spinner("正在配對場站名稱並寫入 2.0／2.0E 現況……"):
+                    live_payload = normalize_server_live_payload(browser_payload)
                     st.session_state[f"latest_live_records::{active_base['token']}"] = list(live_payload["records"])
                     st.session_state[f"latest_live_event_id::{active_base['token']}"] = str(
                         live_payload.get("event_id") or browser_event_id or uuid.uuid4().hex
@@ -9628,7 +8887,7 @@ with st.expander("即時資料狀態與配對明細", expanded=False):
                         base_df = live_updated_df
                         live_event_id = str(live_payload.get("event_id") or browser_event_id or "")
                         common_live_meta = {
-                            "source": live_payload.get("source", "YouBike 官網公開接口（瀏覽器直連，免 TDX）"),
+                            "source": live_payload.get("source", "YouBike 官網公開接口（Python Server 共用快取）"),
                             "fetched_at": live_payload["fetched_at"],
                             "latest_source_time": live_payload.get("latest_source_time", ""),
                             "matched_count": live_summary["matched_count"],
@@ -9705,6 +8964,10 @@ with st.expander("即時資料狀態與配對明細", expanded=False):
                 st.error(f"YouBike 官網同步失敗：{exc}")
             except Exception as exc:
                 st.error(f"YouBike 官網同步發生未預期錯誤：{exc}")
+
+    # 讓隱藏的輕量計時元件立即收到 Server 查詢結果，解除右側「更新中」狀態。
+    if new_server_sync_event:
+        rerun_app()
 
 
 station_alerts = build_station_alert_records(base_df)

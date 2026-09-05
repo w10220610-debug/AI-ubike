@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
 import unicodedata
 from difflib import SequenceMatcher
 from functools import lru_cache
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from config import (
+    APP_VERSION,
+    BATTERY_RETRY_BACKOFF_SECONDS,
+    STATION_CATALOG_MAX_ATTEMPTS,
+    STATION_CATALOG_REQUEST_TIMEOUT_SECONDS,
     STATION_CATALOG_TTL_SECONDS,
     STATION_MATCH_AMBIGUITY_MARGIN,
     STATION_MATCH_THRESHOLD,
@@ -25,6 +32,33 @@ class StationServiceError(RuntimeError):
 
 _catalog_lock = threading.Lock()
 _catalog_cache: tuple[float, tuple[dict, ...]] | None = None
+_match_cache: dict[tuple[str, str], dict | None] = {}
+_match_cache_guard = threading.RLock()
+
+
+def _build_logger() -> logging.Logger:
+    logger = logging.getLogger("ai_ubike.station")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+    log_dir = Path("logs")
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler: logging.Handler = RotatingFileHandler(
+            log_dir / "station.log",
+            maxBytes=2_000_000,
+            backupCount=3,
+            encoding="utf-8",
+        )
+    except OSError:
+        handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(handler)
+    logger.propagate = False
+    return logger
+
+
+_logger = _build_logger()
 
 
 def _first_nonempty(*values):
@@ -86,15 +120,57 @@ def _similarity(a: str, b: str) -> float:
 
 
 def _request_catalog() -> tuple[dict, ...]:
-    request = Request(
-        YOUBIKE_STATION_CATALOG_URL,
-        headers={"Accept": "application/json, text/plain, */*", "User-Agent": "AI-UBIKE/30 station-service"},
-    )
-    try:
-        with urlopen(request, timeout=15) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise StationServiceError(f"YouBike 場站清單讀取失敗：{exc}") from exc
+    last_error: BaseException | None = None
+    payload: Any = None
+    for attempt in range(1, STATION_CATALOG_MAX_ATTEMPTS + 1):
+        started = time.perf_counter()
+        request = Request(
+            YOUBIKE_STATION_CATALOG_URL,
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "User-Agent": f"AI-UBIKE/{APP_VERSION} station-service",
+            },
+        )
+        try:
+            with urlopen(request, timeout=STATION_CATALOG_REQUEST_TIMEOUT_SECONDS) as response:
+                payload = json.loads(response.read().decode("utf-8-sig"))
+            _logger.info(
+                "[STATION_CATALOG_API] status=ok attempt=%s/%s latency_ms=%s",
+                attempt,
+                STATION_CATALOG_MAX_ATTEMPTS,
+                int((time.perf_counter() - started) * 1000),
+            )
+            break
+        except HTTPError as exc:
+            last_error = exc
+            retryable = int(exc.code) in {408, 425, 429, 500, 502, 503, 504}
+            _logger.warning(
+                "[STATION_CATALOG_API] status=http_%s attempt=%s/%s latency_ms=%s retryable=%s",
+                exc.code,
+                attempt,
+                STATION_CATALOG_MAX_ATTEMPTS,
+                int((time.perf_counter() - started) * 1000),
+                retryable,
+            )
+            if not retryable:
+                break
+        except (URLError, TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            last_error = exc
+            _logger.warning(
+                "[STATION_CATALOG_API] status=%s attempt=%s/%s latency_ms=%s",
+                type(exc).__name__,
+                attempt,
+                STATION_CATALOG_MAX_ATTEMPTS,
+                int((time.perf_counter() - started) * 1000),
+            )
+        if attempt < STATION_CATALOG_MAX_ATTEMPTS:
+            delay_index = min(attempt - 1, len(BATTERY_RETRY_BACKOFF_SECONDS) - 1)
+            time.sleep(BATTERY_RETRY_BACKOFF_SECONDS[delay_index])
+    else:
+        payload = None
+
+    if payload is None:
+        raise StationServiceError(f"YouBike 場站清單讀取失敗：{last_error}") from last_error
 
     records: list[dict] = []
     for item in _extract_items(payload):
@@ -135,8 +211,20 @@ def get_station_catalog(*, force: bool = False) -> tuple[dict, ...]:
         now = time.time()
         if cached and not force and now - cached[0] <= STATION_CATALOG_TTL_SECONDS:
             return cached[1]
-        records = _request_catalog()
+        try:
+            records = _request_catalog()
+        except StationServiceError as exc:
+            if cached:
+                _logger.warning(
+                    "[STATION_CATALOG_API] status=failed fallback=stale_cache cache_age=%.2fs error=%s",
+                    time.time() - cached[0],
+                    exc,
+                )
+                return cached[1]
+            raise
         _catalog_cache = (time.time(), records)
+        with _match_cache_guard:
+            _match_cache.clear()
         return records
 
 
@@ -158,10 +246,23 @@ def match_station(
     district: str = "",
     catalog: Iterable[dict] | None = None,
 ) -> dict | None:
+    use_shared_cache = catalog is None
     records = tuple(catalog) if catalog is not None else get_station_catalog()
     wanted_key = normalize_station_name(station_name)
     if not wanted_key:
         return None
+    cache_key = (wanted_key, _normalize_district(district))
+    if use_shared_cache:
+        with _match_cache_guard:
+            if cache_key in _match_cache:
+                cached_match = _match_cache[cache_key]
+                return dict(cached_match) if cached_match is not None else None
+
+    def finish(result: dict | None) -> dict | None:
+        if use_shared_cache:
+            with _match_cache_guard:
+                _match_cache[cache_key] = dict(result) if result is not None else None
+        return result
 
     exact = [record for record in records if str(record.get("station_key") or "") == wanted_key]
     if district and len(exact) > 1:
@@ -169,13 +270,13 @@ def match_station(
         if len(district_matches) == 1:
             chosen = dict(district_matches[0])
             chosen.update({"match_score": 1.08, "match_method": "exact+district"})
-            return chosen
+            return finish(chosen)
     if len(exact) == 1:
         chosen = dict(exact[0])
         chosen.update({"match_score": 1.0, "match_method": "exact"})
-        return chosen
+        return finish(chosen)
     if len(exact) > 1:
-        return None
+        return finish(None)
 
     ranked: list[tuple[float, dict]] = []
     for record in records:
@@ -183,15 +284,15 @@ def match_station(
         if score >= STATION_MATCH_THRESHOLD:
             ranked.append((score, record))
     if not ranked:
-        return None
+        return finish(None)
     ranked.sort(key=lambda item: item[0], reverse=True)
     best_score, best = ranked[0]
     second_score = ranked[1][0] if len(ranked) > 1 else -1.0
     if best_score < 0.96 and second_score >= best_score - STATION_MATCH_AMBIGUITY_MARGIN:
-        return None
+        return finish(None)
     chosen = dict(best)
     chosen.update({"match_score": round(best_score, 4), "match_method": "fuzzy"})
-    return chosen
+    return finish(chosen)
 
 
 def match_station_specs(stations: Iterable[dict]) -> list[dict]:

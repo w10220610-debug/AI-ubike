@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from config import (
+    APP_VERSION,
     BATTERY_CACHE_TTL_SECONDS,
     BATTERY_MAX_ATTEMPTS,
     BATTERY_MAX_CONCURRENCY,
@@ -145,7 +146,7 @@ def _is_retryable_http_status(status: int) -> bool:
     return status in {408, 425, 429, 500, 502, 503, 504}
 
 
-def _request_station_battery(station_no: str) -> tuple[tuple[dict, ...], int]:
+def _request_station_battery(station_no: str, station_name: str = "") -> tuple[tuple[dict, ...], int]:
     last_error: BaseException | None = None
     latency_ms = 0
     for attempt in range(1, BATTERY_MAX_ATTEMPTS + 1):
@@ -155,7 +156,7 @@ def _request_station_battery(station_no: str) -> tuple[tuple[dict, ...], int]:
             f"{YOUBIKE_BATTERY_URL}?{query}",
             headers={
                 "Accept": "application/json, text/plain, */*",
-                "User-Agent": "AI-UBIKE/30 battery-service",
+                "User-Agent": f"AI-UBIKE/{APP_VERSION} battery-service",
             },
         )
         try:
@@ -169,8 +170,9 @@ def _request_station_battery(station_no: str) -> tuple[tuple[dict, ...], int]:
             last_error = exc
             retryable = _is_retryable_http_status(int(exc.code))
             _logger.warning(
-                "[BATTERY_API] station_no=%s status=http_%s attempt=%s/%s latency_ms=%s retryable=%s",
-                station_no, exc.code, attempt, BATTERY_MAX_ATTEMPTS, latency_ms, retryable,
+                "[BATTERY_API] request=bike/lists station=%s station_no=%s status=http_%s "
+                "attempt=%s/%s latency_ms=%s retryable=%s",
+                station_name, station_no, exc.code, attempt, BATTERY_MAX_ATTEMPTS, latency_ms, retryable,
             )
             if not retryable:
                 break
@@ -178,8 +180,9 @@ def _request_station_battery(station_no: str) -> tuple[tuple[dict, ...], int]:
             latency_ms = int((time.perf_counter() - started) * 1000)
             last_error = exc
             _logger.warning(
-                "[BATTERY_API] station_no=%s status=%s attempt=%s/%s latency_ms=%s",
-                station_no, type(exc).__name__, attempt, BATTERY_MAX_ATTEMPTS, latency_ms,
+                "[BATTERY_API] request=bike/lists station=%s station_no=%s status=%s "
+                "attempt=%s/%s latency_ms=%s",
+                station_name, station_no, type(exc).__name__, attempt, BATTERY_MAX_ATTEMPTS, latency_ms,
             )
 
         if attempt < BATTERY_MAX_ATTEMPTS:
@@ -226,7 +229,10 @@ def get_station_battery(
     with _cache_guard:
         cached = _cache.get(key)
     if cached and not force and _fresh(cached, request_started_at):
-        _logger.info("[BATTERY_API] station_no=%s cache=hit age=%.2fs", key, cached.age_seconds)
+        _logger.info(
+            "[BATTERY_API] request=bike/lists station=%s station_no=%s cache=hit age=%.2fs",
+            station_name or cached.station_name, key, cached.age_seconds,
+        )
         return cached.as_dict()
 
     lock = _station_lock(key)
@@ -242,7 +248,7 @@ def get_station_battery(
             return cached.as_dict()
 
         try:
-            bikes, latency_ms = _request_station_battery(key)
+            bikes, latency_ms = _request_station_battery(key, station_name)
             snapshot = BatterySnapshot(
                 station_no=key,
                 station_name=str(station_name or (cached.station_name if cached else "")),
@@ -254,7 +260,8 @@ def get_station_battery(
             with _cache_guard:
                 _cache[key] = snapshot
             _logger.info(
-                "[BATTERY_API] station=%s station_no=%s status=ok cache=miss bikes=%s latency_ms=%s",
+                "[BATTERY_API] request=bike/lists station=%s station_no=%s status=ok "
+                "cache=miss bikes=%s latency_ms=%s",
                 snapshot.station_name, key, len(bikes), latency_ms,
             )
             return snapshot.as_dict()
@@ -263,12 +270,14 @@ def get_station_battery(
             if cached and _stale_usable(cached, now):
                 stale = replace(cached, source="stale_cache", error=str(exc))
                 _logger.warning(
-                    "[BATTERY_API] station=%s station_no=%s status=failed fallback=stale_cache cache_age=%.2fs",
+                    "[BATTERY_API] request=bike/lists station=%s station_no=%s status=failed "
+                    "cache=expired fallback=stale_cache cache_age=%.2fs",
                     cached.station_name, key, cached.age_seconds,
                 )
                 return stale.as_dict()
             _logger.error(
-                "[BATTERY_API] station=%s station_no=%s status=failed fallback=none error=%s",
+                "[BATTERY_API] request=bike/lists station=%s station_no=%s status=failed "
+                "cache=miss fallback=none error=%s",
                 station_name, key, exc,
             )
             raise
@@ -279,8 +288,8 @@ def refresh_station_battery(station_no: str, *, station_name: str = "") -> dict:
 
 
 def get_station_battery_by_name(station_name: str, *, district: str = "", force: bool = False) -> dict:
-    catalog = get_station_catalog()
-    match = match_station(station_name, district=district, catalog=catalog)
+    # 由 station_service 的全程序配對快取處理，不在每次 UI rerun 重掃全臺場站。
+    match = match_station(station_name, district=district)
     if match is None:
         raise BatteryServiceError(f"找不到可安全配對的 YouBike 場站：{station_name}")
     result = get_station_battery(
