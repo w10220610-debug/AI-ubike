@@ -82,9 +82,48 @@ def render_floating_battery_query(
             fab.title = '查詢 YouBike 2.0E 電量';
             fab.setAttribute('aria-label', '電量查詢');
           };
+
+          const pillarSortKey = (row) => {
+            const label = row.querySelector('span')?.textContent || '';
+            const match = label.match(/\d+/);
+            return match ? Number(match[0]) : Number.MAX_SAFE_INTEGER;
+          };
+
+          const sortBatteryRowsByPillar = () => {
+            doc.querySelectorAll('#ubike-battery-v29-upgrade .bike-list').forEach(list => {
+              const current = Array.from(list.children).filter(node => node.classList?.contains('bike'));
+              if (current.length < 2) return;
+              const sorted = [...current].sort((a, b) => {
+                const diff = pillarSortKey(a) - pillarSortKey(b);
+                if (diff) return diff;
+                const aText = a.querySelector('span')?.textContent || '';
+                const bText = b.querySelector('span')?.textContent || '';
+                return aText.localeCompare(bText, 'zh-Hant', { numeric: true, sensitivity: 'base' });
+              });
+              const changed = current.some((node, index) => node !== sorted[index]);
+              if (!changed) return;
+              const firstNonBike = Array.from(list.children).find(node => !node.classList?.contains('bike')) || null;
+              sorted.forEach(node => list.insertBefore(node, firstNonBike));
+            });
+          };
+
           applyLabel();
+          sortBatteryRowsByPillar();
           window.setTimeout(applyLabel, 80);
           window.setTimeout(applyLabel, 300);
+          window.setTimeout(sortBatteryRowsByPillar, 100);
+          window.setTimeout(sortBatteryRowsByPillar, 500);
+
+          const batteryRoot = doc.body;
+          if (batteryRoot && !window.parent.__ubikePillarSortObserver) {
+            let sortTimer = null;
+            const observer = new MutationObserver(() => {
+              window.clearTimeout(sortTimer);
+              sortTimer = window.setTimeout(sortBatteryRowsByPillar, 30);
+            });
+            observer.observe(batteryRoot, { childList: true, subtree: true });
+            window.parent.__ubikePillarSortObserver = observer;
+          }
         })();
         </script>
         '''
@@ -133,7 +172,7 @@ replace_exact(
 
 replace_exact(
     '''st.set_page_config(\n    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",\n    page_icon="🚚",\n    layout="wide",\n)''',
-    '''st.set_page_config(\n    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",\n    page_icon="🚚",\n    layout="wide",\n)\n\n_UPDATE_CONTENT_MD = """\n#### V29 更新內容\n- 電池查詢範圍支援 Excel 任意區域，不再限制 D1／D2／D3。\n- 上傳外縣市 Excel 時，不會混入台東內建備援場站。\n- 未上傳配置表時，仍保留台東備援電量查詢。\n- 場站即時車數使用 V29 同步架構，不再依賴手機隱藏同步元件。\n- 右側更新按鈕可重新取得即時場站資料。\n- 電池查詢已升級為 V29 Fast Client：並行查詢、逐站回填，不阻塞主畫面。\n- 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。\n"""\nif hasattr(st, "popover"):\n    with st.popover("更新內容"):\n        st.markdown(_UPDATE_CONTENT_MD)\nelse:\n    with st.expander("更新內容", expanded=False):\n        st.markdown(_UPDATE_CONTENT_MD)''',
+    '''st.set_page_config(\n    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",\n    page_icon="🚚",\n    layout="wide",\n)\n\n_UPDATE_CONTENT_MD = """\n#### V29 更新內容\n- 電池查詢範圍支援 Excel 任意區域，不再限制 D1／D2／D3。\n- 上傳外縣市 Excel 時，不會混入台東內建備援場站。\n- 未上傳配置表時，仍保留台東備援電量查詢。\n- 場站即時車數使用 V29 同步架構，不再依賴手機隱藏同步元件。\n- 右側更新按鈕可重新取得即時場站資料。\n- 電池查詢已升級為 V29 Fast Client：並行查詢、逐站回填，不阻塞主畫面。\n- 電池場站展開後，低電車明細依柱號由小到大排列。\n- 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。\n"""\nif hasattr(st, "popover"):\n    with st.popover("更新內容"):\n        st.markdown(_UPDATE_CONTENT_MD)\nelse:\n    with st.expander("更新內容", expanded=False):\n        st.markdown(_UPDATE_CONTENT_MD)''',
     label="update content popover",
 )
 
