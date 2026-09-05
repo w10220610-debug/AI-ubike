@@ -8,7 +8,10 @@ executing it, this entrypoint applies focused V29 compatibility fixes:
 1. battery ranges accept any non-empty Excel zone instead of D1/D2/D3 only;
 2. an uploaded workbook never gets merged with the built-in Taitung fallback;
 3. Taitung fallback remains available only in the existing no-workbook path;
-4. mobile manual refresh can reach the hidden YouBike sync component reliably.
+4. live station sync uses the V29 Python Server service instead of requiring a
+   hidden browser Streamlit component on mobile;
+5. the floating refresh button requests a fresh server sync by reloading with a
+   one-time refresh token when no browser component exists.
 """
 
 from pathlib import Path
@@ -54,27 +57,31 @@ replace_exact(
     label="uploaded-workbook battery range",
 )
 
-# Mobile browsers can fail to expose the hidden Streamlit component iframe with
-# the title/src used by the floating refresh button. Publish a direct bridge on
-# the parent window as soon as the component is ready; postMessage remains the
-# fallback for browsers where direct parent access is unavailable.
+# Replace the browser-only component factory with a Python Server backed
+# callable. Downstream legacy UI code still receives the same payload shape, so
+# the existing matching, cache persistence and UI rendering do not need to be
+# rewritten.
 replace_exact(
-    '''  button.addEventListener("click", () => runSync({ forceDelivery: true }));\n  window.addEventListener("message", event => {''',
-    '''  button.addEventListener("click", () => runSync({ forceDelivery: true }));\n  try {\n    window.parent.__ubikeManualSync = () => runSync({ forceDelivery: true });\n    window.parent.__ubikeSyncReady = true;\n  } catch (_bridgeError) {\n    // Direct parent bridge unavailable; postMessage fallback remains active.\n  }\n  window.addEventListener("message", event => {''',
-    label="mobile sync direct bridge",
+    'def normalize_browser_live_payload(payload) -> dict:',
+    '''def get_youbike_browser_sync_component():\n    """V29 compatibility: obtain live station data from the Python Server."""\n    from live_status_service import LiveStatusServiceError, get_live_status_for_stations\n\n    def _server_sync_component(**_kwargs):\n        stations = globals().get("_V29_SERVER_LIVE_STATIONS", [])\n        if not stations:\n            return {\n                "ok": False,\n                "event_id": uuid.uuid4().hex,\n                "error": "目前配置沒有可供同步的場站。",\n            }\n\n        refresh_token = ""\n        try:\n            refresh_token = str(st.query_params.get("live_refresh", "") or "").strip()\n        except Exception:\n            refresh_token = ""\n        refresh_state_key = "v29_server_live_refresh_token"\n        force_refresh = bool(\n            refresh_token\n            and st.session_state.get(refresh_state_key) != refresh_token\n        )\n        if force_refresh:\n            st.session_state[refresh_state_key] = refresh_token\n\n        try:\n            return get_live_status_for_stations(stations, force=force_refresh)\n        except LiveStatusServiceError as exc:\n            return {\n                "ok": False,\n                "event_id": uuid.uuid4().hex,\n                "error": str(exc),\n            }\n        except Exception as exc:\n            return {\n                "ok": False,\n                "event_id": uuid.uuid4().hex,\n                "error": f"Server 即時車數同步失敗：{exc}",\n            }\n\n    return _server_sync_component\n\n\ndef normalize_browser_live_payload(payload) -> dict:''',
+    label="server live component adapter",
 )
 
-# Prefer the direct bridge. If the component has not mounted yet, retry briefly
-# instead of immediately showing the old "sync component not ready" dead end.
+# Build the exact station scope from the currently selected/uploaded workbook.
+# This also makes the server sync automatically follow cross-county Excel data.
 replace_exact(
-    '''            function requestManualSync() {{\n                let postedCount = 0;''',
-    '''            function requestManualSync() {{\n                if (typeof win.__ubikeManualSync === "function") {{\n                    win.__ubikeManualSyncRetryCount = 0;\n                    setRefreshButtonState(true);\n                    showToast("正在手動更新 YouBike 即時車數");\n                    try {{\n                        win.__ubikeManualSync();\n                    }} catch (_bridgeError) {{\n                        setRefreshButtonState(false);\n                        showToast("同步連線暫時中斷，正在重新連線");\n                    }}\n                    return;\n                }}\n                let postedCount = 0;''',
-    label="mobile sync prefer direct bridge",
+    '    browser_payload = None',
+    '''    _V29_SERVER_LIVE_STATIONS = [\n        {\n            "name": str(row.get("場站名稱") or "").strip(),\n            "district": str(row.get("行政區") or "").strip(),\n        }\n        for _, row in base_df.iterrows()\n        if str(row.get("場站名稱") or "").strip()\n    ]\n    browser_payload = None''',
+    label="server live station scope",
 )
+
+# The legacy floating refresh button used to require discovery of a hidden
+# Streamlit iframe. With the V29 server adapter there is intentionally no iframe.
+# A refresh token causes one forced server fetch on the next Streamlit run.
 replace_exact(
     '''                if (!postedCount) {{\n                    showToast("同步元件尚未準備完成，請稍後再按一次");\n                    return;\n                }}\n                setRefreshButtonState(true);''',
-    '''                if (!postedCount) {{\n                    const retryCount = Number(win.__ubikeManualSyncRetryCount || 0);\n                    if (retryCount < 6) {{\n                        win.__ubikeManualSyncRetryCount = retryCount + 1;\n                        setRefreshButtonState(true);\n                        showToast("正在連接 YouBike 同步元件…");\n                        win.setTimeout(() => {{\n                            setRefreshButtonState(false);\n                            requestManualSync();\n                        }}, 500);\n                        return;\n                    }}\n                    win.__ubikeManualSyncRetryCount = 0;\n                    setRefreshButtonState(false);\n                    showToast("同步元件無法啟動，請重新整理頁面後再試");\n                    return;\n                }}\n                win.__ubikeManualSyncRetryCount = 0;\n                setRefreshButtonState(true);''',
-    label="mobile sync readiness retry",
+    '''                if (!postedCount) {{\n                    setRefreshButtonState(true);\n                    showToast("正在重新同步 YouBike 即時資料…");\n                    try {{\n                        const refreshUrl = new URL(win.location.href);\n                        refreshUrl.searchParams.set("live_refresh", String(Date.now()));\n                        win.location.href = refreshUrl.toString();\n                    }} catch (_refreshError) {{\n                        win.location.reload();\n                    }}\n                    return;\n                }}\n                setRefreshButtonState(true);''',
+    label="server live floating refresh",
 )
 
 exec(compile(source, str(LEGACY_APP), "exec"), globals(), globals())
