@@ -18,7 +18,9 @@ executing it, this entrypoint applies focused V29 compatibility fixes:
    new engine replaces the old entry instead of appearing as a second control.
 """
 
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from battery_icon_data import BATTERY_ICON_DATA_URI
 from battery_upgrade import render_floating_server_battery as _render_floating_server_battery
@@ -26,6 +28,48 @@ from battery_upgrade import render_floating_server_battery as _render_floating_s
 
 LEGACY_APP = Path(__file__).with_name("legacy_ui.py")
 source = LEGACY_APP.read_text(encoding="utf-8")
+
+
+AI_TIMEZONE = ZoneInfo("Asia/Taipei")
+AI_NIGHT_SHIFT_END_HOUR = 7
+AI_NIGHT_SHIFT_END_MINUTE = 30
+
+
+def resolve_ai_shift_context(shift: str, now: datetime | None = None) -> dict[str, str]:
+    """Resolve the main-page shift into the AI learning day context.
+
+    Early/late shifts follow the normal calendar day. The legacy ``夜班配置``
+    is the user's 大夜 shift: before/through 07:30 it belongs to the calendar
+    day already reached after midnight; after 07:30 it belongs to the next
+    operating day. This keeps one 21:30-07:30 shift on one learning date.
+    """
+    local_now = now.astimezone(AI_TIMEZONE) if now is not None else datetime.now(AI_TIMEZONE)
+    raw_shift = str(shift or "").strip()
+
+    if "大夜" in raw_shift or ("夜班" in raw_shift and "晚班" not in raw_shift):
+        shift_label = "大夜"
+    elif "早班" in raw_shift:
+        shift_label = "早班"
+    elif "晚班" in raw_shift:
+        shift_label = "晚班"
+    else:
+        shift_label = raw_shift.replace("配置", "") or "未設定"
+
+    operating_date = local_now.date()
+    if shift_label == "大夜":
+        current_hm = (local_now.hour, local_now.minute)
+        night_end_hm = (AI_NIGHT_SHIFT_END_HOUR, AI_NIGHT_SHIFT_END_MINUTE)
+        if current_hm > night_end_hm:
+            operating_date += timedelta(days=1)
+
+    day_type = "假日" if operating_date.weekday() >= 5 else "平日"
+    return {
+        "source_shift": raw_shift,
+        "shift": shift_label,
+        "day_type": day_type,
+        "operating_date": operating_date.isoformat(),
+        "actual_datetime": local_now.isoformat(),
+    }
 
 
 def render_floating_battery_query(
@@ -172,8 +216,14 @@ replace_exact(
 
 replace_exact(
     '''st.set_page_config(\n    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",\n    page_icon="🚚",\n    layout="wide",\n)''',
-    '''st.set_page_config(\n    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",\n    page_icon="🚚",\n    layout="wide",\n)\n\n_UPDATE_CONTENT_MD = """\n#### V29 更新內容\n- 電池查詢範圍支援 Excel 任意區域，不再限制 D1／D2／D3。\n- 上傳外縣市 Excel 時，不會混入台東內建備援場站。\n- 未上傳配置表時，仍保留台東備援電量查詢。\n- 場站即時車數使用 V29 同步架構，不再依賴手機隱藏同步元件。\n- 右側更新按鈕可重新取得即時場站資料。\n- 電池查詢已升級為 V29 Fast Client：並行查詢、逐站回填，不阻塞主畫面。\n- 電池場站展開後，低電車明細依柱號由小到大排列。\n- 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。\n"""\nif hasattr(st, "popover"):\n    with st.popover("更新內容"):\n        st.markdown(_UPDATE_CONTENT_MD)\nelse:\n    with st.expander("更新內容", expanded=False):\n        st.markdown(_UPDATE_CONTENT_MD)''',
+    '''st.set_page_config(\n    page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",\n    page_icon="🚚",\n    layout="wide",\n)\n\n_UPDATE_CONTENT_MD = """\n#### V29 更新內容\n- 電池查詢範圍支援 Excel 任意區域，不再限制 D1／D2／D3。\n- 上傳外縣市 Excel 時，不會混入台東內建備援場站。\n- 未上傳配置表時，仍保留台東備援電量查詢。\n- 場站即時車數使用 V29 同步架構，不再依賴手機隱藏同步元件。\n- 右側更新按鈕可重新取得即時場站資料。\n- 電池查詢已升級為 V29 Fast Client：並行查詢、逐站回填，不阻塞主畫面。\n- 電池場站展開後，低電車明細依柱號由小到大排列。\n- AI 班別直接跟隨主頁班別；早班／晚班用當天，大夜用跨日後的營運日判斷平日／假日。\n- 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。\n"""\nif hasattr(st, "popover"):\n    with st.popover("更新內容"):\n        st.markdown(_UPDATE_CONTENT_MD)\nelse:\n    with st.expander("更新內容", expanded=False):\n        st.markdown(_UPDATE_CONTENT_MD)''',
     label="update content popover",
+)
+
+replace_exact(
+    '''    selected_shift = st.selectbox(\n        "班別",\n        list(SHIFT_COLUMNS.keys()),\n        key=f"shift::{active_base['token']}",\n    )\n    page_mode = st.radio(''',
+    '''    selected_shift = st.selectbox(\n        "班別",\n        list(SHIFT_COLUMNS.keys()),\n        key=f"shift::{active_base['token']}",\n    )\n    _ai_shift_context = resolve_ai_shift_context(selected_shift)\n    st.session_state["ai_shift_context"] = _ai_shift_context\n    st.caption(\n        f"🤖 AI 模式：{_ai_shift_context['day_type']}・{_ai_shift_context['shift']}"\n    )\n    page_mode = st.radio(''',
+    label="AI shift day context",
 )
 
 # Keep the legacy browser battery implementation in the source for rollback,
