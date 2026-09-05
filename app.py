@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# 版本：V29.0｜可見配置頁＋免配置電量＋綁車提示版
+# 版本：V29｜原介面保留＋底層效能優化
 
 import base64
 import hashlib
@@ -36,9 +36,11 @@ from dispatch_core import (
     available_sources,
     parse_route,
 )
+from battery_components import render_floating_server_battery, render_inline_server_battery
+from battery_ui_adapter import query_stations_for_ui
 
 
-APP_VERSION = "V29.0"
+APP_VERSION = "V30.0"
 APP_VERSION_NAME = "測試版"
 APP_BUILD_DATE = "2026-08-31"
 DEFAULT_BATTERY_THRESHOLD = 89
@@ -79,135 +81,28 @@ STATUS_UNAVAILABLE_TEXT = "資料未取得"
 
 # 電量查詢在尚未上傳配置表時仍可直接使用。
 # 此內建清單由目前提供的「顯示中」工作表建立；上傳新配置後會以新配置優先並補上新場站。
-DEFAULT_BATTERY_ROUTE_STATION_MAP = {'D1': [{'name': '臺東縣政府文化處圖書館', 'district': '台東市'},
-        {'name': '臺東轉運站', 'district': '台東市'},
-        {'name': '臺東市公所', 'district': '台東市'},
-        {'name': '臺東縣政府', 'district': '台東市'},
-        {'name': '微光市集', 'district': '台東市'},
-        {'name': '臺東縣立體育場', 'district': '台東市'},
-        {'name': '東海國宅', 'district': '台東市'},
-        {'name': '東海運動公園', 'district': '台東市'},
-        {'name': '臺東火車站', 'district': '台東市'},
-        {'name': '臺東棒球村第一棒球場', 'district': '台東市'},
-        {'name': '寶桑國中活動中心', 'district': '台東市'},
-        {'name': '生日蛋糕公園', 'district': '台東市'},
-        {'name': '國立臺東女子高級中學', 'district': '台東市'},
-        {'name': '仁義北路與豐里橋交叉口', 'district': '台東市'},
-        {'name': '臺東公園', 'district': '台東市'},
-        {'name': '兒福聯盟臺東工作站', 'district': '台東市'},
-        {'name': '國立臺東高級商業職業學校', 'district': '台東市'},
-        {'name': '寶桑國小', 'district': '台東市'},
-        {'name': '臺東縣環境保護局', 'district': '台東市'},
-        {'name': '臺東市漢中街公園', 'district': '台東市'},
-        {'name': '臺東聖母醫院', 'district': '台東市'},
-        {'name': '柳州街停車場', 'district': '台東市'},
-        {'name': '仁義北路河堤涼亭', 'district': '台東市'},
-        {'name': '國立臺東高級中學學生宿舍', 'district': '台東市'},
-        {'name': '桂林南路238巷與中華路一段719巷口', 'district': '台東市'},
-        {'name': '臺東縣私立公東高級工業職業學校', 'district': '台東市'},
-        {'name': '四維夜市', 'district': '台東市'},
-        {'name': '四維路三段與傳廣路交叉口', 'district': '台東市'},
-        {'name': '四維路三段與泰安街(西側)', 'district': '台東市'},
-        {'name': '開封街鐵馬道', 'district': '台東市'},
-        {'name': '四維路三段與長安街交叉口', 'district': '台東市'},
-        {'name': '臺東縣立新生國民中學', 'district': '台東市'},
-        {'name': '臺東縣臺東市康樂國小', 'district': '台東市'},
-        {'name': '臺東專科學校宿舍', 'district': '台東市'},
-        {'name': '臺東專科學校', 'district': '台東市'},
-        {'name': '正氣公園', 'district': '台東市'},
-        {'name': '長沙街溜冰場', 'district': '台東市'},
-        {'name': '臺東航空站', 'district': '台東市'},
-        {'name': '娜路彎大酒店', 'district': '台東市'},
-        {'name': '臺東大學附屬特殊教育學校', 'district': '台東市'},
-        {'name': '康樂火車站', 'district': '台東市'},
-        {'name': '國立臺灣史前文化博物館', 'district': '台東市'},
-        {'name': '臺東大學附屬體育高級中學', 'district': '台東市'},
-        {'name': '臺東表演藝術創生基地', 'district': '台東市'},
-        {'name': '臺東市新生國民小學', 'district': '台東市'},
-        {'name': '北町日式宿舍', 'district': '台東市'},
-        {'name': '國立臺東大學知本校區正門', 'district': '台東市'},
-        {'name': '卑南遺址公園', 'district': '台東市'},
-        {'name': '新興路與北安路52巷口', 'district': '台東市'},
-        {'name': '知本火車站', 'district': '台東市'},
-        {'name': '臺東市仁愛國民小學', 'district': '台東市'},
-        {'name': '南一街與南一街113巷口', 'district': '台東市'},
-        {'name': '馬蘭部落更生聚會所', 'district': '台東市'},
-        {'name': '統冠聯合超市(臺東店)', 'district': '台東市'},
-        {'name': '寶桑里活動中心', 'district': '台東市'},
-        {'name': '臺東市豐田國民小學', 'district': '台東市'},
-        {'name': '自強公園', 'district': '台東市'},
-        {'name': '臺東市東海國民小學', 'district': '台東市'},
-        {'name': '榮民總醫院更生院區', 'district': '台東市'},
-        {'name': '東方大鎮鐵馬道', 'district': '台東市'},
-        {'name': '更生北路384巷與永安街口', 'district': '台東市'},
-        {'name': '東立羽球館', 'district': '台東市'},
-        {'name': '立麗大酒店', 'district': '台東市'},
-        {'name': '大橋部落聚會所', 'district': '台東市'},
-        {'name': '興安路二段與樂利路口', 'district': '台東市'},
-        {'name': '知本代天府', 'district': '台東市'},
-        {'name': '富岡地質公園', 'district': '台東市'},
-        {'name': '育仁中學', 'district': '台東市'},
-        {'name': '馬蘭橋', 'district': '台東市'},
-        {'name': '秀泰影城', 'district': '台東市'},
-        {'name': '臺東社區大學', 'district': '台東市'},
-        {'name': '臺東縣長期照顧中心', 'district': '台東市'},
-        {'name': '仁和公園', 'district': '台東市'},
-        {'name': '法鼓山信行寺', 'district': '台東市'},
-        {'name': '臺東縣立壘球場', 'district': '台東市'},
-        {'name': '富岡公有停車場', 'district': '台東市'},
-        {'name': '大同路與精誠路口', 'district': '台東市'},
-        {'name': '福建路與大同路口', 'district': '台東市'},
-        {'name': '知本芙儷渡假酒店', 'district': '台東市'},
-        {'name': '衡陽路151巷口', 'district': '台東市'},
-        {'name': '原民創產園區', 'district': '台東市'},
-        {'name': '復興路128號', 'district': '台東市'},
-        {'name': '卑南遊客中心', 'district': '卑南鄉'},
-        {'name': '臺東戶政事務所卑南辦公室', 'district': '卑南鄉'},
-        {'name': '7-11東遊季門市', 'district': '卑南鄉'},
-        {'name': '知本第一公有停車場', 'district': '卑南鄉'},
-        {'name': '東台溫泉飯店', 'district': '卑南鄉'},
-        {'name': '知本國家森林遊樂區', 'district': '卑南鄉'},
-        {'name': '臺東大學行政服務大樓', 'district': '台東市'},
-        {'name': '臺東大學人文學院', 'district': '台東市'},
-        {'name': '臺東大學師範學院', 'district': '台東市'},
-        {'name': '臺東大學理工學院', 'district': '台東市'},
-        {'name': '臺東大學第一學生宿舍', 'district': '台東市'},
-        {'name': '臺東大學學生活動中心', 'district': '台東市'},
-        {'name': '臺東大學鏡心書院', 'district': '台東市'},
-        {'name': '臺東大學第二宿舍餐飲中心', 'district': '台東市'}],
- 'D2': [{'name': '卑南鄉老人文康中心', 'district': '卑南鄉'},
-        {'name': '瑞源車站', 'district': '鹿野鄉'},
-        {'name': '永安農產品銷售中心', 'district': '鹿野鄉'},
-        {'name': '龍田大草坪', 'district': '鹿野鄉'},
-        {'name': '鹿野車站', 'district': '鹿野鄉'},
-        {'name': '福鹿山休閒農莊', 'district': '鹿野鄉'},
-        {'name': '鹿野地區農會', 'district': '鹿野鄉'},
-        {'name': '龍田老人會館', 'district': '鹿野鄉'},
-        {'name': '永安環教中心', 'district': '鹿野鄉'},
-        {'name': '關山車站', 'district': '關山鎮'},
-        {'name': '米國學校', 'district': '關山鎮'},
-        {'name': '關山工商', 'district': '關山鎮'},
-        {'name': '關山鎮圖書館', 'district': '關山鎮'},
-        {'name': '關山國小', 'district': '關山鎮'},
-        {'name': '關山慈濟醫院', 'district': '關山鎮'},
-        {'name': '池上車站', 'district': '池上鄉'},
-        {'name': '池上郵局', 'district': '池上鄉'},
-        {'name': '池上國中', 'district': '池上鄉'},
-        {'name': '客家文化園區', 'district': '池上鄉'},
-        {'name': '池上大坡池', 'district': '池上鄉'},
-        {'name': '池上三號運動公園', 'district': '池上鄉'},
-        {'name': '日暉國際渡假村', 'district': '池上鄉'},
-        {'name': '池上維調', 'district': '池上鄉'}],
- 'D3': [{'name': '富山護漁區', 'district': '卑南鄉'},
-        {'name': '成功漁港', 'district': '成功鎮'},
-        {'name': '成功鎮公所', 'district': '成功鎮'},
-        {'name': '成功豆花', 'district': '成功鎮'},
-        {'name': '東管處停車場', 'district': '成功鎮'},
-        {'name': '三仙台', 'district': '成功鎮'},
-        {'name': '成功海濱公園', 'district': '成功鎮'},
-        {'name': '都蘭舊糖廠', 'district': '東河鄉'},
-        {'name': '東河消防隊', 'district': '東河鄉'},
-        {'name': '成功消防隊', 'district': '成功鎮'}]}
+def _load_taitung_fallback_station_map() -> dict[str, list[dict]]:
+    """台東免配置電量查詢備援；跨縣市上傳 Excel 後不會強制套用。"""
+    candidates = (
+        Path(__file__).with_name("taitung_fallback.json"),
+        Path(__file__).parent / "data" / "taitung_fallback.json",
+    )
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    return {
+                        str(zone): [dict(item) for item in items if isinstance(item, dict)]
+                        for zone, items in payload.items()
+                        if isinstance(items, list)
+                    }
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return {}
+
+
+DEFAULT_BATTERY_ROUTE_STATION_MAP = _load_taitung_fallback_station_map()
 
 
 def normalize_current_status(value) -> int | None:
@@ -4516,190 +4411,9 @@ DISPATCH_GEOLOCATION_COMPONENT_HTML = r"""<!doctype html>
 _DISPATCH_GEOLOCATION_COMPONENT = None
 
 
-LOW_BATTERY_CLIENT_CORE_JS = r"""
-      function ensureUbikeBatteryService(win) {
-        const serviceVersion = "v27.5.1";
-        const existing = win.__ubikeBatteryService;
-        if (existing && existing.version === serviceVersion) return existing;
-
-        const catalogUrl = "https://apis.youbike.com.tw/json/station-min-yb2.json";
-        const batteryUrl = "https://apis.youbike.com.tw/api/front/bike/lists";
-        let catalogCache = null;
-        let catalogPromise = null;
-        const batteryCache = new Map();
-        const batteryInflight = new Map();
-
-        function wait(milliseconds) {
-          return new Promise(resolve => win.setTimeout(resolve, milliseconds));
-        }
-        function normalizeStationName(value) {
-          return String(value || "")
-            .toLowerCase()
-            .replaceAll("臺", "台")
-            .replace(/^(?:youbike|ubike)\s*2\s*[.．]?\s*0\s*e?\s*[_\-－—:：]*\s*/i, "")
-            .replaceAll("公共自行車租賃站", "")
-            .replace(/[^0-9a-z㐀-鿿]/g, "");
-        }
-        function extractItems(payload) {
-          if (Array.isArray(payload)) return payload.filter(item => item && typeof item === "object");
-          if (!payload || typeof payload !== "object") return [];
-          for (const candidate of [payload.data, payload.result, payload.stations, payload.retVal]) {
-            if (Array.isArray(candidate)) return candidate.filter(item => item && typeof item === "object");
-            if (candidate && typeof candidate === "object" && Array.isArray(candidate.data)) {
-              return candidate.data.filter(item => item && typeof item === "object");
-            }
-          }
-          return [];
-        }
-        function isTaitungStation(item) {
-          const text = [item.county_tw, item.city_tw, item.district_tw, item.address_tw, item.name_tw]
-            .map(value => String(value || ""))
-            .join(" ")
-            .replaceAll("臺", "台");
-          return String(item.area_code || "") === "15" || text.includes("台東");
-        }
-        function matchCatalogStation(stationName, catalog) {
-          const wantedKey = normalizeStationName(stationName);
-          const exact = catalog.filter(
-            item => normalizeStationName(item.name_tw || item.sna || item.station_name) === wantedKey,
-          );
-          if (exact.length === 1) return exact[0];
-          const partial = catalog
-            .map(item => {
-              const candidateKey = normalizeStationName(item.name_tw || item.sna || item.station_name);
-              const includes = wantedKey.length >= 4 && candidateKey.length >= 4
-                && (wantedKey.includes(candidateKey) || candidateKey.includes(wantedKey));
-              const score = includes
-                ? Math.min(wantedKey.length, candidateKey.length) / Math.max(wantedKey.length, candidateKey.length)
-                : 0;
-              return { item, score };
-            })
-            .filter(record => record.score >= .72)
-            .sort((left, right) => right.score - left.score);
-          if (!partial.length) return null;
-          if (partial.length > 1 && partial[1].score >= partial[0].score - .02) return null;
-          return partial[0].item;
-        }
-        async function fetchJson(url, { attempts = 2, timeoutMs = 14000 } = {}) {
-          let lastError = null;
-          for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
-            const controller = new win.AbortController();
-            const timeout = win.setTimeout(() => controller.abort(), timeoutMs);
-            try {
-              const response = await win.fetch(url, {
-                cache: "no-store",
-                credentials: "omit",
-                signal: controller.signal,
-              });
-              if (!response.ok) {
-                const error = new Error(`HTTP ${response.status}`);
-                error.retryable = [408, 425, 429, 500, 502, 503, 504].includes(response.status);
-                throw error;
-              }
-              return await response.json();
-            } catch (error) {
-              lastError = error;
-              const networkFailure = error?.name === "AbortError"
-                || error instanceof TypeError
-                || /load failed|failed to fetch|networkerror|network request failed/i.test(
-                  String(error?.message || error),
-                );
-              if (attempt >= attempts || (!networkFailure && error?.retryable !== true)) throw error;
-              await wait(320 * attempt + Math.floor(Math.random() * 260));
-            } finally {
-              win.clearTimeout(timeout);
-            }
-          }
-          throw lastError || new Error("網路連線失敗");
-        }
-        async function getCatalog({ force = false, attempts = 2, timeoutMs = 15000 } = {}) {
-          if (catalogCache && !force) return catalogCache;
-          if (catalogPromise && !force) return catalogPromise;
-          catalogPromise = fetchJson(catalogUrl, { attempts, timeoutMs })
-            .then(payload => {
-              const catalog = extractItems(payload).filter(isTaitungStation);
-              if (!catalog.length) throw new Error("找不到臺東場站清單");
-              catalogCache = catalog;
-              return catalogCache;
-            })
-            .finally(() => {
-              catalogPromise = null;
-            });
-          return catalogPromise;
-        }
-        function normalizeBatteryRecords(payload) {
-          const records = Array.isArray(payload?.retVal) ? payload.retVal : extractItems(payload);
-          return records.map(record => {
-            const batteryPower = Number(record.battery_power);
-            return {
-              bike_no: String(record.bike_no || "").trim(),
-              pillar_no: String(record.pillar_no || "").trim(),
-              battery_power: Number.isFinite(batteryPower)
-                ? Math.max(0, Math.min(100, Math.trunc(batteryPower)))
-                : null,
-            };
-          }).filter(record => record.bike_no && Number.isFinite(record.battery_power));
-        }
-        async function getBatteryListByStationNo(
-          stationNo,
-          { force = false, ttlMs = 45000, attempts = 2, timeoutMs = 14000 } = {},
-        ) {
-          const key = String(stationNo || "").trim();
-          if (!key) throw new Error("場站編號不存在");
-          const cached = batteryCache.get(key);
-          if (!force && cached && Date.now() - cached.fetchedAt <= ttlMs) return cached.bikes;
-          if (batteryInflight.has(key)) {
-            try {
-              const inflightResult = await batteryInflight.get(key);
-              if (!force) return inflightResult;
-            } catch (_) {}
-          }
-          const promise = fetchJson(
-            `${batteryUrl}?station_no=${encodeURIComponent(key)}`,
-            { attempts, timeoutMs },
-          ).then(payload => {
-            const bikes = normalizeBatteryRecords(payload);
-            batteryCache.set(key, { fetchedAt: Date.now(), bikes });
-            return bikes;
-          }).finally(() => {
-            if (batteryInflight.get(key) === promise) batteryInflight.delete(key);
-          });
-          batteryInflight.set(key, promise);
-          return promise;
-        }
-        async function queryStationByName(stationName, options = {}) {
-          const catalog = await getCatalog({
-            attempts: options.attempts,
-            timeoutMs: options.timeoutMs,
-          });
-          const matched = matchCatalogStation(stationName, catalog);
-          if (!matched) throw new Error("官方清單找不到此場站");
-          const stationNo = String(
-            matched.station_no || matched.sno || matched.station_id || "",
-          ).trim();
-          if (!stationNo) throw new Error("官方場站缺少站號");
-          const bikes = await getBatteryListByStationNo(stationNo, options);
-          return {
-            matched: true,
-            stationNo,
-            stationName: String(stationName || "").trim(),
-            bikes,
-          };
-        }
-
-        const service = {
-          version: serviceVersion,
-          normalizeStationName,
-          getCatalog,
-          matchCatalogStation,
-          getBatteryListByStationNo,
-          queryStationByName,
-          clearBatteryCache() { batteryCache.clear(); },
-        };
-        win.__ubikeBatteryService = service;
-        return service;
-      }
-"""
+# V30：電池／柱號資料一律由 Python Server 的 battery_service.py 取得。
+# 保留一個空白腳本佔位，讓舊賈維斯元件模板可以相容，但瀏覽器不再 fetch YouBike Battery API。
+LOW_BATTERY_CLIENT_CORE_JS = ""
 
 JARVIS_TRIGGER_BOOTSTRAP_HTML = r'''<!doctype html>
 <html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -5226,13 +4940,17 @@ JARVIS_BROWSER_COMPONENT_HTML = r'''<!doctype html>
 
   async function batteryInfo(stationName){
     if(!stationName) return {low:[],ultra:[]};
-    try{
-      const result=await service.queryStationByName(stationName,{attempts:2,timeoutMs:12000});
-      const threshold=Math.max(0,Math.min(100,num(args.threshold)));
-      const priority=Math.max(0,Math.min(threshold,num(args.priority_threshold)));
-      const bikes=Array.isArray(result?.bikes)?result.bikes:[];
-      return {low:bikes.filter(x=>Number.isFinite(x.battery_power)&&x.battery_power<=threshold), ultra:bikes.filter(x=>Number.isFinite(x.battery_power)&&x.battery_power<=priority)};
-    }catch(error){ return {low:[],ultra:[],error:text(error?.message||error)}; }
+    const plans=[currentPlan,...candidates].filter(Boolean);
+    const plan=plans.find(item=>text(item?.station_name)===text(stationName));
+    const threshold=Math.max(0,Math.min(100,num(args.threshold)));
+    const priority=Math.max(0,Math.min(threshold,num(args.priority_threshold)));
+    const bikes=Array.isArray(plan?.server_battery_bikes)?plan.server_battery_bikes:[];
+    const error=text(plan?.server_battery_error||'');
+    return {
+      low:bikes.filter(x=>Number.isFinite(Number(x.battery_power))&&Number(x.battery_power)<=threshold),
+      ultra:bikes.filter(x=>Number.isFinite(Number(x.battery_power))&&Number(x.battery_power)<=priority),
+      error:error||''
+    };
   }
   function batterySuffix(info){
     if(!info || info.error || !info.low?.length) return "";
@@ -5509,318 +5227,30 @@ _JARVIS_VOICE_COMPONENT = None
 
 
 def get_jarvis_voice_component():
-    """建立隱藏式賈維斯語音元件；由「測試版」單擊切換啟用狀態。"""
+    """建立隱藏式賈維斯語音元件；V30 不再把 YouBike fetch 邏輯送到瀏覽器。"""
     global _JARVIS_VOICE_COMPONENT
     if _JARVIS_VOICE_COMPONENT is not None:
         return _JARVIS_VOICE_COMPONENT
-    component_dir = Path(tempfile.gettempdir()) / "taitung_jarvis_voice_component_v7"
+    component_dir = Path(tempfile.gettempdir()) / "ai_ubike_jarvis_voice_component_v30"
     component_dir.mkdir(parents=True, exist_ok=True)
     index_path = component_dir / "index.html"
-    content = JARVIS_BROWSER_COMPONENT_HTML.replace("__LOW_BATTERY_CLIENT_CORE__", LOW_BATTERY_CLIENT_CORE_JS)
+    # 模板仍保留舊 placeholder，但 V30 注入的是無網路請求的相容 stub。
+    client_stub = "function ensureUbikeBatteryService(win){return {version:'server-v30'};}"
+    content = JARVIS_BROWSER_COMPONENT_HTML.replace("__LOW_BATTERY_CLIENT_CORE__", client_stub)
     try:
         if not index_path.exists() or index_path.read_text(encoding="utf-8") != content:
             index_path.write_text(content, encoding="utf-8")
     except OSError as exc:
         raise RuntimeError(f"無法建立賈維斯語音元件：{exc}") from exc
-    _JARVIS_VOICE_COMPONENT = components.declare_component("taitung_jarvis_voice_v5", path=str(component_dir))
+    _JARVIS_VOICE_COMPONENT = components.declare_component("ai_ubike_jarvis_voice_v30", path=str(component_dir))
     return _JARVIS_VOICE_COMPONENT
 
 
 
 @st.cache_data(show_spinner=False, max_entries=192)
-def _build_inline_low_battery_pillars_html(
-    station_specs: tuple[tuple[str, str, str], ...],
-    threshold: int,
-    priority_threshold: int,
-    mobile_mode: bool,
-    *,
-    auto_query: bool,
-    force_station: str = "",
-) -> str:
-    """建立主頁柱號查詢元件；智慧調度自動查，一般分析按站查。"""
-    specs = [
-        {"name": name, "kind": kind, "target": target}
-        for name, kind, target in station_specs
-        if str(name).strip()
-    ]
-    specs_payload = json.dumps(specs, ensure_ascii=False).replace("</", "<\\/")
-    display_mode = json.dumps("mobile" if mobile_mode else "desktop")
-    force_payload = json.dumps(str(force_station or ""), ensure_ascii=False)
-    fingerprint = json.dumps(
-        hashlib.sha1(
-            (
-                f"{APP_VERSION}|{threshold}|{priority_threshold}|{auto_query}|"
-                f"{display_mode}|{force_station}|{specs_payload}"
-            ).encode("utf-8")
-        ).hexdigest()
-    )
-    component_html = r"""
-    <script>
-    (() => {
-      __LOW_BATTERY_CLIENT_CORE__
-      const specs = __STATION_SPECS__;
-      const threshold = __THRESHOLD__;
-      const priorityThreshold = __PRIORITY_THRESHOLD__;
-      const autoQuery = __AUTO_QUERY__;
-      const forceStation = __FORCE_STATION__;
-      const displayMode = __DISPLAY_MODE__;
-      const fingerprint = __FINGERPRINT__;
-      const doc = window.parent.document;
-      const win = window.parent;
-      const service = ensureUbikeBatteryService(win);
-      const requestIsMobile = displayMode === "mobile"
-        || win.matchMedia("(max-width: 700px)").matches;
-      const generation = `${fingerprint}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      win.__ubikeInlineBatteryGeneration = generation;
-
-      doc.querySelectorAll(".ubike-inline-battery").forEach(node => node.remove());
-      doc.getElementById("ubike-inline-battery-style")?.remove();
-      const style = doc.createElement("style");
-      style.id = "ubike-inline-battery-style";
-      style.textContent = `
-        .ubike-inline-battery {
-          display:flex; align-items:center; flex-wrap:wrap; gap:5px;
-          margin-top:7px; padding:7px 8px; border:1px solid rgba(85,246,255,.28);
-          border-radius:10px; color:#a9c9d3; background:rgba(4,16,29,.72);
-          box-shadow:inset 3px 0 rgba(85,246,255,.42); font-size:12px; line-height:1.45;
-        }
-        .analysis-station-cell .ubike-inline-battery {max-width:100%;}
-        .ubike-inline-battery .ubike-battery-label {color:#8feff5; font-weight:850;}
-        .ubike-inline-battery .ubike-pillar {
-          display:inline-flex; align-items:center; min-height:25px; padding:3px 7px;
-          border:1px solid rgba(85,246,255,.35); border-radius:999px;
-          color:#dffcff; background:rgba(85,246,255,.09); font-weight:900;
-        }
-        .ubike-inline-battery .ubike-pillar.urgent {
-          color:#fff; border-color:#ff496c; background:linear-gradient(100deg,#d91d55,#ff3fcf);
-          box-shadow:0 0 11px rgba(255,63,207,.38); animation:ubikePillarPulse 1.7s ease-in-out infinite;
-        }
-        .ubike-inline-battery.is-empty {color:#9cb5bd; box-shadow:inset 3px 0 rgba(126,249,255,.20);}
-        .ubike-inline-battery.is-error {color:#ff91a9; border-color:rgba(255,73,108,.46); box-shadow:inset 3px 0 #ff496c;}
-        .ubike-inline-battery button {
-          min-height:29px; padding:4px 9px; border:1px solid rgba(85,246,255,.42);
-          border-radius:8px; color:#061116; background:linear-gradient(105deg,#55f6ff,#f4ff57);
-          font:850 12px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft JhengHei",sans-serif;
-          cursor:pointer;
-        }
-        .ubike-inline-battery .ubike-battery-refresh {
-          min-width:29px; padding:3px 7px; margin-left:auto; color:#8feff5;
-          background:rgba(85,246,255,.08);
-        }
-        @keyframes ubikePillarPulse {0%,100%{filter:brightness(1)}50%{filter:brightness(1.28)}}
-        @media (max-width:700px) {
-          .ubike-inline-battery {gap:4px; padding:6px 7px; font-size:11px;}
-          .ubike-inline-battery .ubike-pillar {min-height:24px; padding:3px 6px;}
-        }
-      `;
-      doc.head.appendChild(style);
-
-      const wrappersByName = new Map();
-      const normalizedSpecNames = new Set(specs.map(spec => service.normalizeStationName(spec.name)));
-      function targetForSpec(spec) {
-        if (spec.kind === "analysis") return doc.getElementById(spec.target);
-        if (spec.kind === "candidate") {
-          return Array.from(doc.querySelectorAll('[class*="st-key-candidate_card_select_"]'))
-            .find(node => node.classList.contains(spec.target)) || null;
-        }
-        return null;
-      }
-      function registerWrapper(stationName, host, { manual = false } = {}) {
-        if (!host || Array.from(host.children || []).some(
-          child => child.classList?.contains("ubike-inline-battery"),
-        )) return;
-        const wrapper = doc.createElement("div");
-        wrapper.className = "ubike-inline-battery";
-        wrapper.dataset.stationName = stationName;
-        if (manual) {
-          const button = doc.createElement("button");
-          button.type = "button";
-          button.textContent = "⚡ 查低電量柱號";
-          button.addEventListener("click", event => {
-            event.preventDefault();
-            event.stopPropagation();
-            queryStation(stationName, true);
-          });
-          wrapper.appendChild(button);
-        } else {
-          const label = doc.createElement("span");
-          label.className = "ubike-battery-label";
-          label.textContent = "⚡ 柱號準備中…";
-          wrapper.appendChild(label);
-        }
-        host.appendChild(wrapper);
-        const normalized = service.normalizeStationName(stationName);
-        if (!wrappersByName.has(normalized)) wrappersByName.set(normalized, []);
-        wrappersByName.get(normalized).push(wrapper);
-      }
-      function attachTargets() {
-        for (const spec of specs) {
-          const target = targetForSpec(spec);
-          if (!target) continue;
-          const host = spec.kind === "analysis"
-            ? (target.querySelector(".analysis-station-cell") || target)
-            : target;
-          registerWrapper(spec.name, host, { manual: !autoQuery });
-        }
-        for (const plan of doc.querySelectorAll(".dispatch-plan-card[data-ubike-station-name]")) {
-          const stationName = String(plan.dataset.ubikeStationName || "").trim();
-          if (!normalizedSpecNames.has(service.normalizeStationName(stationName))) continue;
-          registerWrapper(stationName, plan, { manual: false });
-        }
-      }
-      function wrappersFor(stationName) {
-        return wrappersByName.get(service.normalizeStationName(stationName)) || [];
-      }
-      function setLoading(stationName) {
-        for (const wrapper of wrappersFor(stationName)) {
-          wrapper.classList.remove("is-error", "is-empty");
-          wrapper.replaceChildren();
-          const label = doc.createElement("span");
-          label.className = "ubike-battery-label";
-          label.textContent = "⚡ 正在讀取柱號…";
-          wrapper.appendChild(label);
-        }
-      }
-      function formatPillar(value) {
-        const raw = String(value || "").trim();
-        if (!raw) return "";
-        const number = Number.parseInt(raw, 10);
-        return Number.isFinite(number) ? String(number).padStart(2, "0") : raw;
-      }
-      function renderResult(stationName, result) {
-        if (win.__ubikeInlineBatteryGeneration !== generation) return;
-        const pillarMap = new Map();
-        for (const bike of Array.isArray(result?.bikes) ? result.bikes : []) {
-          if (!Number.isFinite(Number(bike.battery_power)) || Number(bike.battery_power) > threshold) continue;
-          const pillar = formatPillar(bike.pillar_no);
-          if (!pillar) continue;
-          const previous = pillarMap.get(pillar);
-          if (!previous || Number(bike.battery_power) < Number(previous.battery_power)) {
-            pillarMap.set(pillar, bike);
-          }
-        }
-        const lowBikes = Array.from(pillarMap.entries())
-          .map(([pillar, bike]) => ({ pillar, battery_power: Number(bike.battery_power) }))
-          .sort((left, right) => left.pillar.localeCompare(
-            right.pillar,
-            "zh-Hant",
-            { numeric:true, sensitivity:"base" },
-          ));
-        for (const wrapper of wrappersFor(stationName)) {
-          wrapper.replaceChildren();
-          wrapper.classList.remove("is-error", "is-empty");
-          const label = doc.createElement("span");
-          label.className = "ubike-battery-label";
-          if (!lowBikes.length) {
-            wrapper.classList.add("is-empty");
-            label.textContent = `目前沒有低於 ${threshold}% 的柱號`;
-            wrapper.appendChild(label);
-          } else {
-            label.textContent = `≤${threshold}%：`;
-            wrapper.appendChild(label);
-            for (const bike of lowBikes) {
-              const pillar = doc.createElement("span");
-              pillar.className = "ubike-pillar";
-              const urgent = bike.battery_power <= priorityThreshold;
-              pillar.classList.toggle("urgent", urgent);
-              pillar.textContent = `${urgent ? "⚠ " : ""}${bike.pillar}柱`;
-              wrapper.appendChild(pillar);
-            }
-          }
-          const refresh = doc.createElement("button");
-          refresh.type = "button";
-          refresh.className = "ubike-battery-refresh";
-          refresh.textContent = "↻";
-          refresh.title = "重新讀取本站電池資料";
-          refresh.addEventListener("click", event => {
-            event.preventDefault();
-            event.stopPropagation();
-            queryStation(stationName, true);
-          });
-          wrapper.appendChild(refresh);
-        }
-      }
-      function renderError(stationName) {
-        if (win.__ubikeInlineBatteryGeneration !== generation) return;
-        for (const wrapper of wrappersFor(stationName)) {
-          wrapper.replaceChildren();
-          wrapper.classList.remove("is-empty");
-          wrapper.classList.add("is-error");
-          const label = doc.createElement("span");
-          label.textContent = "電池資料查詢失敗";
-          wrapper.appendChild(label);
-          const retry = doc.createElement("button");
-          retry.type = "button";
-          retry.textContent = "重新查詢";
-          retry.addEventListener("click", event => {
-            event.preventDefault();
-            event.stopPropagation();
-            queryStation(stationName, true);
-          });
-          wrapper.appendChild(retry);
-        }
-      }
-      async function queryStation(stationName, force = false) {
-        if (win.__ubikeInlineBatteryGeneration !== generation) return;
-        setLoading(stationName);
-        try {
-          const result = await service.queryStationByName(stationName, {
-            force,
-            ttlMs: 30000,
-            attempts: requestIsMobile ? 3 : 2,
-            timeoutMs: requestIsMobile ? 15000 : 12000,
-          });
-          renderResult(stationName, result);
-        } catch (_) {
-          renderError(stationName);
-        }
-      }
-      async function runAutomaticQueries() {
-        const uniqueStations = [];
-        const seen = new Set();
-        for (const spec of specs) {
-          const normalized = service.normalizeStationName(spec.name);
-          if (!normalized || seen.has(normalized)) continue;
-          seen.add(normalized);
-          uniqueStations.push(spec.name);
-        }
-        let nextIndex = 0;
-        const workerCount = Math.min(
-          uniqueStations.length,
-          requestIsMobile ? 2 : 4,
-        );
-        async function worker() {
-          while (nextIndex < uniqueStations.length) {
-            const stationName = uniqueStations[nextIndex++];
-            const force = service.normalizeStationName(stationName)
-              === service.normalizeStationName(forceStation);
-            await queryStation(stationName, force);
-            if (requestIsMobile && nextIndex < uniqueStations.length) {
-              await new Promise(resolve => win.setTimeout(resolve, 90));
-            }
-          }
-        }
-        await Promise.all(Array.from({ length:workerCount }, worker));
-      }
-
-      attachTargets();
-      win.setTimeout(attachTargets, 120);
-      win.setTimeout(attachTargets, 420);
-      if (autoQuery && specs.length) win.setTimeout(runAutomaticQueries, 480);
-    })();
-    </script>
-    """
-    return (
-        component_html
-        .replace("__LOW_BATTERY_CLIENT_CORE__", LOW_BATTERY_CLIENT_CORE_JS)
-        .replace("__STATION_SPECS__", specs_payload)
-        .replace("__THRESHOLD__", str(int(threshold)))
-        .replace("__PRIORITY_THRESHOLD__", str(int(priority_threshold)))
-        .replace("__AUTO_QUERY__", "true" if auto_query else "false")
-        .replace("__FORCE_STATION__", force_payload)
-        .replace("__DISPLAY_MODE__", display_mode)
-        .replace("__FINGERPRINT__", fingerprint)
-    )
+def _build_inline_low_battery_pillars_html(*args, **kwargs) -> str:
+    """V30 相容占位；實際渲染已移到 battery_components.py。"""
+    return ""
 
 
 def render_inline_low_battery_pillars(
@@ -5832,1637 +5262,68 @@ def render_inline_low_battery_pillars(
     auto_query: bool,
     force_station: str = "",
 ) -> None:
-    """把柱號結果安全注入既有分析列或智慧推薦卡，不改原本卡片格局。"""
-    normalized_specs = tuple(
-        (str(name), str(kind), str(target))
-        for name, kind, target in station_specs
-        if str(name).strip()
-    )
-    if not normalized_specs:
-        return
-    components.html(
-        _build_inline_low_battery_pillars_html(
-            normalized_specs,
-            min(100, max(0, int(threshold))),
-            min(int(threshold), max(0, int(priority_threshold))),
-            mobile_mode,
-            auto_query=auto_query,
-            force_station=force_station,
-        ),
-        height=0,
-        scrolling=False,
+    """V30：柱號改由 Python Server 查詢，共用快取；瀏覽器只顯示結果。"""
+    render_inline_server_battery(
+        station_specs,
+        threshold=threshold,
+        priority_threshold=priority_threshold,
+        mobile_mode=mobile_mode,
+        auto_query=auto_query,
+        force_station=force_station,
     )
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
-def _build_floating_battery_query_html(
-    route_station_map: dict[str, list[dict]],
-    mobile_mode: bool,
-) -> str:
-    """快取電量查詢元件 HTML，避免每次互動重複替換大型腳本模板。"""
-    route_payload = json.dumps(route_station_map, ensure_ascii=False).replace("</", "<\\/")
-    display_mode = json.dumps("mobile" if mobile_mode else "desktop")
-    battery_fingerprint = json.dumps(
-        hashlib.sha1(
-            f"{APP_VERSION}|{display_mode}|{route_payload}".encode("utf-8")
-        ).hexdigest()
-    )
-    component_html = r"""
-    <script>
-    (() => {
-      __LOW_BATTERY_CLIENT_CORE__
-      const routeStations = __ROUTE_STATIONS__;
-      const displayMode = __DISPLAY_MODE__;
-      const fingerprint = __BATTERY_FINGERPRINT__;
-      const doc = window.parent.document;
-      const win = window.parent;
-      const catalogUrl = "https://apis.youbike.com.tw/json/station-min-yb2.json";
-      const batteryUrl = "https://apis.youbike.com.tw/api/front/bike/lists";
-      const batteryService = ensureUbikeBatteryService(win);
-      const defaultThreshold = 89;
-      const defaultPriorityThreshold = 40;
-      // 換版後使用新偏好鍵，讓本版第一次開啟時確實以 89% 為預設值。
-      const preferenceKey = "ubike-battery-query-preferences-v7";
-      const previousPageWasOpen = Boolean(
-        doc.getElementById("ubike-battery-page")?.classList.contains("open"),
-      );
-      if (previousPageWasOpen) {
-        doc.body.style.overflow = String(win.__ubikeBatteryPreviousBodyOverflow || "");
-      }
-      win.__ubikeBatteryFingerprint = fingerprint;
-
-      doc.getElementById("ubike-battery-fab")?.remove();
-      doc.getElementById("ubike-battery-page")?.remove();
-      doc.getElementById("ubike-battery-style")?.remove();
-
-      const style = doc.createElement("style");
-      style.id = "ubike-battery-style";
-      style.textContent = `
-        #ubike-battery-fab {
-          position: fixed;
-          right: 18px;
-          bottom: 278px;
-          z-index: 2147483000;
-          width: 56px;
-          height: 56px;
-          border: 0;
-          border-radius: 50%;
-          color: #15350f;
-          background: #9ee56f;
-          box-shadow: 0 8px 28px rgba(0,0,0,.28);
-          font: 850 13px/1.1 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft JhengHei", sans-serif;
-          cursor: pointer;
-        }
-        #ubike-battery-fab:hover { transform: translateY(-2px); }
-        #ubike-battery-page {
-          position: fixed;
-          inset: 0;
-          z-index: 2147483600;
-          display: none;
-          overflow-y: auto;
-          overflow-x: hidden;
-          color: #17212b;
-          background: #f4f7f9;
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft JhengHei", sans-serif;
-          overscroll-behavior: contain;
-        }
-        #ubike-battery-page.open { display: block; }
-        #ubike-battery-page * { box-sizing: border-box; }
-        #ubike-battery-page .battery-header {
-          position: sticky;
-          top: 0;
-          z-index: 4;
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          min-height: 66px;
-          padding: max(10px, env(safe-area-inset-top, 0px)) 16px 10px;
-          border-bottom: 1px solid #e2e7eb;
-          background: rgba(255,255,255,.96);
-          backdrop-filter: blur(10px);
-        }
-        #ubike-battery-page .battery-back {
-          width: 42px;
-          height: 42px;
-          flex: 0 0 42px;
-          border: 1px solid #d9e0e5;
-          border-radius: 50%;
-          color: #17212b;
-          background: #fff;
-          font-size: 28px;
-          line-height: 1;
-          cursor: pointer;
-        }
-        #ubike-battery-page .battery-title { font-size: 20px; font-weight: 900; }
-        #ubike-battery-page .battery-main {
-          width: min(100%, 980px);
-          margin: 0 auto;
-          padding: 16px 16px calc(34px + env(safe-area-inset-bottom, 0px));
-        }
-        #ubike-battery-page .battery-control-card {
-          padding: 15px;
-          border: 1px solid #dfe6ea;
-          border-radius: 16px;
-          background: #fff;
-          box-shadow: 0 5px 18px rgba(32,45,55,.07);
-        }
-        #ubike-battery-page .battery-control-grid {
-          display: grid;
-          grid-template-columns: minmax(145px, .65fr) minmax(230px, 1.15fr) minmax(245px, 1fr) minmax(135px, .6fr);
-          gap: 13px;
-          align-items: end;
-        }
-        #ubike-battery-page .battery-label {
-          display: block;
-          margin-bottom: 7px;
-          color: #4b5965;
-          font-size: 13px;
-          font-weight: 850;
-        }
-        #ubike-battery-page .battery-threshold-wrap {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-        }
-        #ubike-battery-page .battery-threshold {
-          width: 100%;
-          min-height: 46px;
-          padding: 8px 12px;
-          border: 2px solid #d9e2e7;
-          border-radius: 11px;
-          color: #111827;
-          background: #fff;
-          font-size: 18px;
-          font-weight: 800;
-        }
-        #ubike-battery-page .battery-scope-list { display: flex; flex-wrap: wrap; gap: 8px; }
-        #ubike-battery-page .battery-scope {
-          position: relative;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          min-width: 70px;
-          min-height: 46px;
-          padding: 8px 13px;
-          border: 2px solid #d9e2e7;
-          border-radius: 11px;
-          color: #374151;
-          background: #fff;
-          font-weight: 850;
-          cursor: pointer;
-        }
-        #ubike-battery-page .battery-scope.selected {
-          border-color: #55a630;
-          color: #234f12;
-          background: #e9f8df;
-        }
-        #ubike-battery-page .battery-scope input { position: absolute; opacity: 0; pointer-events: none; }
-        #ubike-battery-page .battery-sort-wrap {
-          display: grid;
-          grid-template-columns: minmax(0, 1fr) auto;
-          gap: 7px;
-        }
-        #ubike-battery-page .battery-sort {
-          width: 100%;
-          min-height: 46px;
-          padding: 8px 34px 8px 11px;
-          border: 2px solid #d9e2e7;
-          border-radius: 11px;
-          color: #111827;
-          background: #fff;
-          font-size: 15px;
-          font-weight: 800;
-          cursor: pointer;
-        }
-        #ubike-battery-page .battery-locate {
-          min-height: 46px;
-          padding: 8px 11px;
-          border: 2px solid #b9d7ac;
-          border-radius: 11px;
-          color: #28551a;
-          background: #effae9;
-          font-size: 13px;
-          font-weight: 850;
-          white-space: nowrap;
-          cursor: pointer;
-        }
-        #ubike-battery-page .battery-locate:disabled { opacity: .65; cursor: wait; }
-        #ubike-battery-page .battery-locate[hidden] { display: none; }
-        #ubike-battery-page .battery-refresh {
-          width: 100%;
-          min-height: 46px;
-          border: 0;
-          border-radius: 11px;
-          color: #fff;
-          background: #2f7d1d;
-          font-size: 16px;
-          font-weight: 850;
-          cursor: pointer;
-        }
-        #ubike-battery-page .battery-refresh:disabled { opacity: .65; cursor: wait; }
-        #ubike-battery-page .battery-inclusive {
-          margin-top: 9px;
-          color: #66727d;
-          font-size: 12px;
-        }
-        #ubike-battery-page .battery-priority-control {
-          display: grid;
-          grid-template-columns: minmax(205px, .8fr) minmax(165px, .55fr) minmax(250px, 1fr);
-          gap: 11px;
-          align-items: center;
-          margin-top: 12px;
-          padding: 12px 14px;
-          border: 2px solid #e5e7eb;
-          border-radius: 13px;
-          background: #f8fafc;
-        }
-        #ubike-battery-page .battery-priority-control.enabled {
-          border-color: #ef4444;
-          background: #fff1f2;
-          box-shadow: 0 5px 15px rgba(185, 28, 28, .1);
-        }
-        #ubike-battery-page .battery-priority-toggle {
-          display: flex;
-          align-items: center;
-          gap: 9px;
-          color: #7f1d1d;
-          font-size: 15px;
-          font-weight: 900;
-          cursor: pointer;
-        }
-        #ubike-battery-page .battery-priority-toggle input {
-          width: 21px;
-          height: 21px;
-          accent-color: #dc2626;
-        }
-        #ubike-battery-page .battery-priority-threshold-wrap {
-          display: flex;
-          align-items: center;
-          gap: 7px;
-        }
-        #ubike-battery-page .battery-priority-threshold-wrap .battery-label {
-          margin: 0;
-          white-space: nowrap;
-        }
-        #ubike-battery-page .battery-priority-threshold {
-          width: 88px;
-          min-height: 42px;
-          padding: 7px 10px;
-          border: 2px solid #fca5a5;
-          border-radius: 10px;
-          color: #7f1d1d;
-          background: #fff;
-          font-size: 18px;
-          font-weight: 900;
-        }
-        #ubike-battery-page .battery-priority-threshold:disabled {
-          border-color: #d1d5db;
-          color: #9ca3af;
-          background: #f3f4f6;
-        }
-        #ubike-battery-page .battery-priority-hint {
-          color: #7c2d12;
-          font-size: 12px;
-          font-weight: 750;
-          line-height: 1.45;
-        }
-        #ubike-battery-page .battery-location-status {
-          min-height: 18px;
-          margin-top: 7px;
-          color: #356523;
-          font-size: 12px;
-          font-weight: 750;
-        }
-        #ubike-battery-page .battery-location-status.error { color: #b42318; }
-        #ubike-battery-page .battery-location-status[hidden] { display: none; }
-        #ubike-battery-page .battery-status {
-          min-height: 22px;
-          margin: 12px 2px 6px;
-          color: #5f6b75;
-          font-size: 13px;
-        }
-        #ubike-battery-page .battery-status.error { color: #b42318; font-weight: 750; }
-        #ubike-battery-page .battery-summary {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
-          gap: 9px;
-          margin: 10px 0 15px;
-        }
-        #ubike-battery-page .battery-metric {
-          padding: 12px;
-          border: 1px solid #dce7d6;
-          border-radius: 13px;
-          background: #fff;
-        }
-        #ubike-battery-page .battery-metric.total { border-color: #acd59a; background: #effae9; }
-        #ubike-battery-page .battery-metric.priority { border: 2px solid #ef4444; background: #fff1f2; }
-        #ubike-battery-page .battery-metric.priority .battery-metric-label,
-        #ubike-battery-page .battery-metric.priority .battery-metric-value { color: #b91c1c; }
-        #ubike-battery-page .battery-metric-label { color: #66727d; font-size: 12px; font-weight: 800; }
-        #ubike-battery-page .battery-metric-value { margin-top: 3px; font-size: 25px; font-weight: 900; }
-        #ubike-battery-page .battery-district-summary {
-          margin: 10px 0 22px;
-          padding: 20px;
-          border: 4px solid #b91c1c;
-          border-radius: 18px;
-          background: linear-gradient(145deg, #fff1f2, #ffedd5);
-          box-shadow: 0 12px 30px rgba(185, 28, 28, .24);
-        }
-        #ubike-battery-page .battery-district-summary[hidden] { display: none; }
-        #ubike-battery-page .battery-district-summary-title {
-          color: #7f1d1d;
-          font-size: 23px;
-          line-height: 1.25;
-          font-weight: 900;
-        }
-        #ubike-battery-page .battery-district-summary-hint {
-          margin: 5px 0 14px;
-          color: #7c2d12;
-          font-size: 13px;
-          font-weight: 800;
-        }
-        #ubike-battery-page .battery-district-summary-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
-          gap: 12px;
-        }
-        #ubike-battery-page .battery-district-summary .battery-district-metric {
-          padding: 17px 12px;
-          border: 3px solid #fb923c;
-          border-radius: 14px;
-          background: #fff;
-          box-shadow: 0 5px 13px rgba(154, 52, 18, .12);
-          text-align: center;
-        }
-        #ubike-battery-page .battery-district-summary .battery-district-metric.highest {
-          border-color: #dc2626;
-          background: #fff1f2;
-          box-shadow: 0 7px 17px rgba(185, 28, 28, .2);
-        }
-        #ubike-battery-page .battery-district-summary .battery-metric-label {
-          color: #7c2d12;
-          font-size: 18px;
-          font-weight: 900;
-        }
-        #ubike-battery-page .battery-district-summary .battery-metric-value {
-          margin-top: 7px;
-          color: #b91c1c;
-          font-size: 40px;
-          line-height: 1.05;
-          font-weight: 950;
-        }
-        #ubike-battery-page .battery-route-title { margin: 18px 2px 8px; font-size: 17px; font-weight: 900; }
-        #ubike-battery-page .battery-station {
-          margin-bottom: 8px;
-          border: 1px solid #dfe5e9;
-          border-radius: 13px;
-          overflow: hidden;
-          background: #fff;
-        }
-        #ubike-battery-page .battery-station.unmatched { border-color: #f0c36b; }
-        #ubike-battery-page .battery-station.priority {
-          border: 2px solid #dc2626;
-          box-shadow: 0 7px 18px rgba(185, 28, 28, .16);
-        }
-        #ubike-battery-page .battery-station summary {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 10px;
-          min-height: 54px;
-          padding: 10px 13px;
-          cursor: pointer;
-          list-style: none;
-        }
-        #ubike-battery-page .battery-station summary::-webkit-details-marker { display: none; }
-        #ubike-battery-page .battery-station-heading {
-          display: flex;
-          min-width: 0;
-          flex-direction: column;
-          gap: 3px;
-        }
-        #ubike-battery-page .battery-station-name { font-size: 15px; font-weight: 850; }
-        #ubike-battery-page .battery-station-meta {
-          color: #69757f;
-          font-size: 12px;
-          font-weight: 720;
-        }
-        #ubike-battery-page .battery-recommended {
-          display: inline-block;
-          margin-right: 5px;
-          padding: 2px 6px;
-          border-radius: 999px;
-          color: #244d16;
-          background: #dff3d4;
-          font-size: 11px;
-          font-weight: 900;
-        }
-        #ubike-battery-page .battery-priority-badge {
-          display: inline-block;
-          margin-right: 5px;
-          padding: 2px 7px;
-          border-radius: 999px;
-          color: #fff;
-          background: #dc2626;
-          font-size: 11px;
-          font-weight: 900;
-        }
-        #ubike-battery-page .battery-count {
-          flex: 0 0 auto;
-          padding: 5px 9px;
-          border-radius: 999px;
-          color: #236015;
-          background: #e7f7df;
-          font-size: 13px;
-          font-weight: 900;
-        }
-        #ubike-battery-page .battery-count.needs-change { color: #b42318; background: #fee4e2; }
-        #ubike-battery-page .battery-count.unknown { color: #8a5200; background: #fff0c2; }
-        #ubike-battery-page .battery-bike-list { border-top: 1px solid #eef1f3; }
-        #ubike-battery-page .battery-bike-row {
-          display: grid;
-          grid-template-columns: 1.2fr .8fr .8fr;
-          gap: 8px;
-          padding: 10px 13px;
-          border-bottom: 1px solid #f0f2f4;
-          font-size: 14px;
-        }
-        #ubike-battery-page .battery-bike-row:last-child { border-bottom: 0; }
-        #ubike-battery-page .battery-bike-row.priority { background: #fff1f2; box-shadow: inset 4px 0 #dc2626; }
-        #ubike-battery-page .battery-bike-no { font-weight: 850; }
-        #ubike-battery-page .battery-power { color: #b42318; font-weight: 900; }
-        #ubike-battery-page .battery-empty { padding: 13px; color: #6b7280; font-size: 13px; }
-
-        /* v27.5：電量頁延續原版格局，更新配色、光影與穩定查詢。 */
-        #ubike-battery-fab {
-          color: #061116;
-          background: linear-gradient(135deg, #55f6ff, #f4ff57);
-          box-shadow: 0 0 24px rgba(85,246,255,.38), 0 8px 28px rgba(0,0,0,.34);
-        }
-        #ubike-battery-page {
-          color: #effcff;
-          background:
-            linear-gradient(rgba(85,246,255,.04) 1px, transparent 1px),
-            linear-gradient(90deg, rgba(85,246,255,.04) 1px, transparent 1px),
-            radial-gradient(circle at 12% 8%, rgba(255,63,207,.16), transparent 28rem),
-            radial-gradient(circle at 88% 20%, rgba(85,246,255,.13), transparent 30rem),
-            linear-gradient(145deg, #050811, #091526 55%, #100817);
-          background-size: 36px 36px, 36px 36px, auto, auto, auto;
-        }
-        #ubike-battery-page .battery-header {
-          color: #effcff;
-          border-bottom-color: rgba(85,246,255,.34);
-          background: rgba(5,11,22,.96);
-          box-shadow: 0 8px 24px rgba(0,0,0,.30), inset 0 -1px rgba(255,63,207,.24);
-        }
-        #ubike-battery-page .battery-back {
-          color: #55f6ff;
-          border-color: rgba(85,246,255,.48);
-          background: rgba(85,246,255,.08);
-          box-shadow: inset 0 0 12px rgba(85,246,255,.04), 0 0 12px rgba(85,246,255,.08);
-        }
-        #ubike-battery-page .battery-title {color:#f7ffff; text-shadow:0 0 13px rgba(85,246,255,.30);}
-        #ubike-battery-page .battery-control-card {
-          color:#effcff;
-          border-color:rgba(85,246,255,.30);
-          background:linear-gradient(135deg, rgba(8,22,38,.96), rgba(28,8,37,.94));
-          box-shadow:inset 3px 0 rgba(255,63,207,.45), 0 9px 24px rgba(0,0,0,.26);
-        }
-        #ubike-battery-page .battery-label {color:#8feff5;}
-        #ubike-battery-page .battery-threshold,
-        #ubike-battery-page .battery-sort,
-        #ubike-battery-page .battery-priority-threshold {
-          color:#effcff;
-          border-color:rgba(85,246,255,.38);
-          background:#071225;
-          box-shadow:inset 0 0 12px rgba(85,246,255,.035);
-        }
-        #ubike-battery-page .battery-sort option {color:#effcff; background:#071225;}
-        #ubike-battery-page .battery-threshold-wrap strong,
-        #ubike-battery-page .battery-priority-threshold-wrap strong {color:#f4ff57;}
-        #ubike-battery-page .battery-scope {
-          color:#b2cdd6;
-          border-color:rgba(85,246,255,.27);
-          background:rgba(6,17,31,.92);
-          box-shadow:inset 0 0 10px rgba(85,246,255,.025);
-        }
-        #ubike-battery-page .battery-scope.selected {
-          color:#061116;
-          border-color:#f4ff57;
-          background:linear-gradient(135deg, #f4ff57, #55f6ff);
-          box-shadow:0 0 16px rgba(244,255,87,.18);
-        }
-        #ubike-battery-page .battery-locate {
-          color:#ff91df;
-          border-color:rgba(255,63,207,.42);
-          background:rgba(255,63,207,.08);
-        }
-        #ubike-battery-page .battery-refresh {
-          color:#061116;
-          background:linear-gradient(105deg, #55f6ff, #3ee9c2 68%, #f4ff57);
-          box-shadow:0 0 19px rgba(85,246,255,.20), inset 0 -2px rgba(0,0,0,.13);
-        }
-        #ubike-battery-page .battery-inclusive {color:#8daab5;}
-        #ubike-battery-page .battery-priority-control {
-          border-color:rgba(255,63,207,.30);
-          background:linear-gradient(105deg, rgba(41,7,36,.78), rgba(7,18,32,.92));
-          box-shadow:inset 3px 0 rgba(255,63,207,.34);
-        }
-        #ubike-battery-page .battery-priority-control.enabled {
-          border-color:#ff3fcf;
-          background:linear-gradient(105deg, rgba(75,5,54,.84), rgba(25,5,27,.94));
-          box-shadow:inset 4px 0 #ff3fcf, 0 0 20px rgba(255,63,207,.15);
-        }
-        #ubike-battery-page .battery-priority-toggle {color:#ff91df;}
-        #ubike-battery-page .battery-priority-toggle input {accent-color:#ff3fcf;}
-        #ubike-battery-page .battery-priority-threshold {color:#ffb1e8; border-color:rgba(255,63,207,.48);}
-        #ubike-battery-page .battery-priority-threshold:disabled {
-          color:#607986;
-          border-color:rgba(123,151,161,.24);
-          background:#0b1622;
-        }
-        #ubike-battery-page .battery-priority-hint {color:#d6a7c9;}
-        #ubike-battery-page .battery-location-status {color:#70f3b4;}
-        #ubike-battery-page .battery-location-status.error,
-        #ubike-battery-page .battery-status.error {color:#ff7798;}
-        #ubike-battery-page .battery-status {color:#9bb7c4;}
-        #ubike-battery-page .battery-metric {
-          color:#effcff;
-          border-color:rgba(85,246,255,.25);
-          background:linear-gradient(135deg, rgba(8,22,38,.94), rgba(19,8,29,.94));
-          box-shadow:inset 3px 0 rgba(85,246,255,.45), 0 7px 18px rgba(0,0,0,.20);
-        }
-        #ubike-battery-page .battery-metric.total {
-          border-color:rgba(244,255,87,.42);
-          background:linear-gradient(135deg, rgba(42,43,7,.80), rgba(8,23,31,.94));
-          box-shadow:inset 3px 0 #f4ff57, 0 0 16px rgba(244,255,87,.07);
-        }
-        #ubike-battery-page .battery-metric.priority {
-          border-color:#ff3fcf;
-          background:linear-gradient(135deg, rgba(70,5,50,.86), rgba(22,6,25,.96));
-          box-shadow:inset 3px 0 #ff3fcf, 0 0 18px rgba(255,63,207,.12);
-        }
-        #ubike-battery-page .battery-metric-label {color:#8caab5;}
-        #ubike-battery-page .battery-metric-value {color:#f7ffff;}
-        #ubike-battery-page .battery-metric.priority .battery-metric-label,
-        #ubike-battery-page .battery-metric.priority .battery-metric-value {color:#ff91df;}
-        #ubike-battery-page .battery-district-summary {
-          border-color:#ff3fcf;
-          background:linear-gradient(130deg, rgba(74,5,51,.94), rgba(23,7,29,.97) 56%, rgba(5,32,39,.94));
-          box-shadow:inset 4px 0 #ff3fcf, 0 0 30px rgba(255,63,207,.15), 0 12px 30px rgba(0,0,0,.30);
-        }
-        #ubike-battery-page .battery-district-summary-title {color:#ffffff; text-shadow:0 0 13px rgba(255,63,207,.25);}
-        #ubike-battery-page .battery-district-summary-hint {color:#efacd8;}
-        #ubike-battery-page .battery-district-summary .battery-district-metric {
-          border-color:rgba(255,126,215,.55);
-          background:linear-gradient(145deg, rgba(42,8,37,.96), rgba(6,20,30,.96));
-          box-shadow:0 6px 16px rgba(0,0,0,.22);
-        }
-        #ubike-battery-page .battery-district-summary .battery-district-metric.highest {
-          border-color:#f4ff57;
-          background:linear-gradient(145deg, rgba(65,38,7,.94), rgba(40,7,35,.96));
-          box-shadow:inset 3px 0 #f4ff57, 0 0 18px rgba(244,255,87,.12);
-        }
-        #ubike-battery-page .battery-district-summary .battery-metric-label {color:#ff9ce1;}
-        #ubike-battery-page .battery-district-summary .battery-metric-value {color:#f4ff57; text-shadow:0 0 14px rgba(244,255,87,.25);}
-        #ubike-battery-page .battery-route-title {color:#effcff; text-shadow:0 0 10px rgba(85,246,255,.20);}
-        #ubike-battery-page .battery-station {
-          color:#effcff;
-          border-color:rgba(85,246,255,.24);
-          background:linear-gradient(135deg, rgba(8,21,37,.94), rgba(17,7,26,.96));
-          box-shadow:inset 3px 0 rgba(85,246,255,.26), 0 7px 18px rgba(0,0,0,.18);
-        }
-        #ubike-battery-page .battery-station.unmatched {border-color:rgba(244,255,87,.55);}
-        #ubike-battery-page .battery-station.priority {
-          border-color:#ff3fcf;
-          background:linear-gradient(135deg, rgba(67,5,48,.92), rgba(19,6,23,.98));
-          box-shadow:inset 4px 0 #ff3fcf, 0 0 20px rgba(255,63,207,.13);
-        }
-        #ubike-battery-page .battery-station-meta {color:#8caab5;}
-        #ubike-battery-page .battery-recommended {color:#7ff9ff; background:rgba(85,246,255,.09);}
-        #ubike-battery-page .battery-priority-badge {color:#fff; background:linear-gradient(90deg, #ff3fcf, #ff496c); box-shadow:0 0 10px rgba(255,63,207,.28);}
-        #ubike-battery-page .battery-count {color:#7ff9ff; background:rgba(85,246,255,.09);}
-        #ubike-battery-page .battery-count.needs-change {color:#ff91df; background:rgba(255,63,207,.12);}
-        #ubike-battery-page .battery-count.unknown {color:#f4ff57; background:rgba(244,255,87,.09);}
-        #ubike-battery-page .battery-bike-list {border-top-color:rgba(85,246,255,.14);}
-        #ubike-battery-page .battery-bike-row {color:#c1d9e1; border-bottom-color:rgba(85,246,255,.10); background:rgba(0,0,0,.10);}
-        #ubike-battery-page .battery-bike-row.priority {background:rgba(255,63,207,.13); box-shadow:inset 4px 0 #ff3fcf;}
-        #ubike-battery-page .battery-bike-no {color:#effcff;}
-        #ubike-battery-page .battery-power {color:#ff75d7; text-shadow:0 0 8px rgba(255,63,207,.16);}
-        #ubike-battery-page .battery-empty {color:#829da8;}
-        @media (max-width: 700px) {
-          #ubike-battery-fab {
-            right: 10px;
-            bottom: calc(312px + env(safe-area-inset-bottom, 0px));
-            width: 52px;
-            height: 52px;
-          }
-          #ubike-battery-page .battery-header { min-height: 60px; padding-left: 10px; padding-right: 10px; }
-          #ubike-battery-page .battery-main { padding: 10px 8px calc(28px + env(safe-area-inset-bottom, 0px)); }
-          #ubike-battery-page .battery-control-card { padding: 12px; }
-          #ubike-battery-page .battery-control-grid { grid-template-columns: 1fr; gap: 11px; }
-          #ubike-battery-page .battery-priority-control { grid-template-columns: 1fr; align-items: start; }
-          #ubike-battery-page .battery-sort-wrap { grid-template-columns: minmax(0, 1fr) auto; }
-          #ubike-battery-page .battery-summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
-          #ubike-battery-page .battery-district-summary { padding: 15px 11px; }
-          #ubike-battery-page .battery-district-summary-title { font-size: 20px; }
-          #ubike-battery-page .battery-district-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
-          #ubike-battery-page .battery-district-summary .battery-metric-label { font-size: 16px; }
-          #ubike-battery-page .battery-district-summary .battery-metric-value { font-size: 34px; }
-          #ubike-battery-page .battery-bike-row { grid-template-columns: 1.25fr .72fr .72fr; padding-left: 10px; padding-right: 10px; }
-        }
-      `;
-      doc.head.appendChild(style);
-
-      const fab = doc.createElement("button");
-      fab.id = "ubike-battery-fab";
-      fab.type = "button";
-      fab.title = "查詢 YouBike 2.0E 電量";
-      fab.textContent = "⚡電量";
-      doc.body.appendChild(fab);
-
-      const page = doc.createElement("section");
-      page.id = "ubike-battery-page";
-      page.setAttribute("aria-hidden", "true");
-      page.innerHTML = `
-        <header class="battery-header">
-          <button class="battery-back" type="button" aria-label="返回智慧調度">‹</button>
-          <div class="battery-title">⚡ 2.0E 電量查詢｜測試版</div>
-        </header>
-        <main class="battery-main">
-          <section class="battery-control-card">
-            <div class="battery-control-grid">
-              <label>
-                <span class="battery-label">更換門檻</span>
-                <span class="battery-threshold-wrap">
-                  <input class="battery-threshold" type="number" min="0" max="100" step="1" inputmode="numeric" value="89" />
-                  <strong>%</strong>
-                </span>
-              </label>
-              <div>
-                <span class="battery-label">統計範圍（可複選）</span>
-                <div class="battery-scope-list"></div>
-              </div>
-              <div>
-                <span class="battery-label">場站排序</span>
-                <div class="battery-sort-wrap">
-                  <select class="battery-sort">
-                    <option value="nearest">離我最近</option>
-                    <option value="district">行政區分區</option>
-                  </select>
-                  <button class="battery-locate" type="button">📍重新定位</button>
-                </div>
-              </div>
-              <button class="battery-refresh" type="button">更新電量</button>
-            </div>
-            <div class="battery-inclusive">門檻包含設定值，例如 89% 會列出電量 ≤ 89% 的車輛。</div>
-            <div class="battery-priority-control">
-              <label class="battery-priority-toggle">
-                <input class="battery-priority-enabled" type="checkbox" />
-                <span>⚠️ 開啟優先門檻</span>
-              </label>
-              <label class="battery-priority-threshold-wrap">
-                <span class="battery-label">第二門檻</span>
-                <input class="battery-priority-threshold" type="number" min="0" max="89" step="1" inputmode="numeric" value="40" disabled />
-                <strong>%</strong>
-              </label>
-              <div class="battery-priority-hint">開啟後，只要場站有電量 ≤ 40% 的電池，就會優先排列；其餘場站仍依原本方式排序。</div>
-            </div>
-            <div class="battery-location-status" aria-live="polite">尚未取得定位。</div>
-          </section>
-          <div class="battery-status">請先選擇 D1、D2 或 D3，再按「更新電量」。</div>
-          <div class="battery-summary"></div>
-          <section class="battery-district-summary" hidden>
-            <div class="battery-district-summary-title">📍 各行政區需更換電池</div>
-            <div class="battery-district-summary-hint">只顯示至少有 1 顆需要更換的行政區</div>
-            <div class="battery-district-summary-grid"></div>
-          </section>
-          <div class="battery-results"></div>
-        </main>
-      `;
-      doc.body.appendChild(page);
-
-      const backButton = page.querySelector(".battery-back");
-      const thresholdInput = page.querySelector(".battery-threshold");
-      const priorityControlNode = page.querySelector(".battery-priority-control");
-      const priorityEnabledInput = page.querySelector(".battery-priority-enabled");
-      const priorityThresholdInput = page.querySelector(".battery-priority-threshold");
-      const priorityHintNode = page.querySelector(".battery-priority-hint");
-      const scopeList = page.querySelector(".battery-scope-list");
-      const sortSelect = page.querySelector(".battery-sort");
-      const locateButton = page.querySelector(".battery-locate");
-      const locationStatusNode = page.querySelector(".battery-location-status");
-      const refreshButton = page.querySelector(".battery-refresh");
-      const statusNode = page.querySelector(".battery-status");
-      const summaryNode = page.querySelector(".battery-summary");
-      const districtSummaryNode = page.querySelector(".battery-district-summary");
-      const districtSummaryTitleNode = page.querySelector(".battery-district-summary-title");
-      const districtSummaryGridNode = page.querySelector(".battery-district-summary-grid");
-      const resultsNode = page.querySelector(".battery-results");
-      const routes = ["D1", "D2", "D3"].filter(route => Array.isArray(routeStations[route]) && routeStations[route].length);
-      let catalogCache = null;
-      let lastResults = [];
-      let lastResultRoutes = [];
-      let userLocation = null;
-      let locationPromise = null;
-      let locationError = "";
-      let previousBodyOverflow = "";
-      const isMobileRequestMode = displayMode === "mobile"
-        || win.matchMedia("(max-width: 700px)").matches;
-
-      function clampThreshold(value) {
-        const number = Number.parseInt(value, 10);
-        return Math.max(0, Math.min(100, Number.isFinite(number) ? number : defaultThreshold));
-      }
-      function clampPriorityThreshold(value) {
-        const replacementThreshold = clampThreshold(thresholdInput.value);
-        const number = Number.parseInt(value, 10);
-        const fallback = Math.min(defaultPriorityThreshold, replacementThreshold);
-        return Math.max(
-          0,
-          Math.min(replacementThreshold, Number.isFinite(number) ? number : fallback),
-        );
-      }
-      function prioritySortingEnabled() {
-        return Boolean(priorityEnabledInput.checked);
-      }
-      function updatePriorityControls() {
-        const enabled = prioritySortingEnabled();
-        const priorityThreshold = clampPriorityThreshold(priorityThresholdInput.value);
-        priorityThresholdInput.value = String(priorityThreshold);
-        priorityThresholdInput.max = String(clampThreshold(thresholdInput.value));
-        priorityThresholdInput.disabled = !enabled;
-        priorityControlNode.classList.toggle("enabled", enabled);
-        priorityHintNode.textContent = enabled
-          ? `優先排序已開啟：有電量 ≤ ${priorityThreshold}% 的場站會排在前面。`
-          : "此功能目前關閉；開啟後，電量 ≤ 第二門檻的場站會優先排列。";
-      }
-      function normalizeSortMode(value) {
-        return value === "district" ? "district" : "nearest";
-      }
-      function readPreferences() {
-        try {
-          const saved = JSON.parse(win.localStorage.getItem(preferenceKey) || "null");
-          if (saved && typeof saved === "object") return saved;
-        } catch (_) {}
-        return {};
-      }
-      function savePreferences() {
-        try {
-          win.localStorage.setItem(preferenceKey, JSON.stringify({
-            threshold: clampThreshold(thresholdInput.value),
-            priority_enabled: prioritySortingEnabled(),
-            priority_threshold: clampPriorityThreshold(priorityThresholdInput.value),
-            sort_mode: normalizeSortMode(sortSelect.value),
-          }));
-        } catch (_) {}
-      }
-      function selectedRoutes() {
-        return Array.from(scopeList.querySelectorAll("input:checked")).map(input => input.value);
-      }
-      function setStatus(message, isError = false) {
-        statusNode.textContent = message;
-        statusNode.classList.toggle("error", isError);
-      }
-      function setLocationStatus(message, isError = false) {
-        locationStatusNode.textContent = message;
-        locationStatusNode.classList.toggle("error", isError);
-      }
-      function updateSortControls() {
-        const usesLocation = normalizeSortMode(sortSelect.value) === "nearest";
-        locateButton.hidden = !usesLocation;
-        locationStatusNode.hidden = !usesLocation;
-        if (!usesLocation) return;
-        if (locationPromise) {
-          locateButton.disabled = true;
-          locateButton.textContent = "定位中…";
-          setLocationStatus("正在取得目前位置……");
-        } else if (locationError) {
-          locateButton.disabled = false;
-          locateButton.textContent = "📍再試一次";
-          setLocationStatus(
-            userLocation
-              ? `${locationError}，目前沿用上次定位排序。`
-              : `${locationError}，已暫時改用行政區分區顯示。`,
-            true,
-          );
-        } else if (userLocation) {
-          locateButton.disabled = false;
-          locateButton.textContent = "📍重新定位";
-          setLocationStatus(`定位完成（誤差約 ${Math.round(userLocation.accuracy || 0)} 公尺），目前依直線距離由近到遠排列。`);
-        } else {
-          locateButton.disabled = false;
-          locateButton.textContent = "📍取得定位";
-          setLocationStatus("尚未取得定位；允許定位後會自動推薦最近場站。");
-        }
-      }
-      function distanceMeters(lat1, lon1, lat2, lon2) {
-        const earthRadius = 6371008.8;
-        const radians = value => Number(value) * Math.PI / 180;
-        const phi1 = radians(lat1);
-        const phi2 = radians(lat2);
-        const deltaPhi = radians(Number(lat2) - Number(lat1));
-        const deltaLambda = radians(Number(lon2) - Number(lon1));
-        const a = Math.sin(deltaPhi / 2) ** 2
-          + Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) ** 2;
-        return earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
-      }
-      function formatDistance(meters) {
-        if (!Number.isFinite(meters)) return "距離無法計算";
-        if (meters < 1000) return `約 ${Math.max(1, Math.round(meters))} 公尺`;
-        return `約 ${(meters / 1000).toFixed(meters < 10000 ? 1 : 0)} 公里`;
-      }
-      function requestCurrentLocation({ force = false } = {}) {
-        if (userLocation && !force) {
-          updateSortControls();
-          return Promise.resolve(userLocation);
-        }
-        if (locationPromise) return locationPromise;
-        const geolocation = (win.navigator && win.navigator.geolocation) || navigator.geolocation;
-        if (!geolocation) {
-          locationError = "此瀏覽器不支援定位";
-          updateSortControls();
-          if (lastResults.length) renderResults();
-          return Promise.resolve(null);
-        }
-
-        locationError = "";
-        const previousLocation = userLocation;
-        locateButton.disabled = true;
-        locateButton.textContent = "定位中…";
-        setLocationStatus("正在取得目前位置……");
-        locationPromise = new Promise(resolve => {
-          const failLocation = error => {
-            const errorMessages = {
-              1: "定位權限被拒絕",
-              2: "目前位置無法取得",
-              3: "定位逾時",
-            };
-            userLocation = previousLocation;
-            locationError = errorMessages[Number(error && error.code)]
-              || String(error && error.message || "定位失敗");
-            resolve(userLocation);
-          };
-          try {
-            geolocation.getCurrentPosition(
-              position => {
-                const latitude = Number(position.coords.latitude);
-                const longitude = Number(position.coords.longitude);
-                if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-                  failLocation({ message: "定位座標格式錯誤" });
-                  return;
-                }
-                userLocation = {
-                  latitude,
-                  longitude,
-                  accuracy: Number(position.coords.accuracy || 0),
-                  updatedAt: Date.now(),
-                };
-                locationError = "";
-                resolve(userLocation);
-              },
-              failLocation,
-              { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 },
-            );
-          } catch (error) {
-            failLocation(error);
-          }
-        }).finally(() => {
-          locationPromise = null;
-          updateSortControls();
-          if (lastResults.length) renderResults();
-        });
-        return locationPromise;
-      }
-      function normalizeStationName(value) {
-        return String(value || "")
-          .toLowerCase()
-          .replaceAll("臺", "台")
-          .replace(/^(?:youbike|ubike)\s*2\s*[.．]?\s*0\s*e?\s*[_\-－—:：]*\s*/i, "")
-          .replaceAll("公共自行車租賃站", "")
-          .replace(/[^0-9a-z㐀-鿿]/g, "");
-      }
-      function firstFiniteNumber(...values) {
-        for (const value of values) {
-          if (value === null || value === undefined || value === "") continue;
-          const number = Number(value);
-          if (Number.isFinite(number)) return number;
-        }
-        return null;
-      }
-      function canonicalDistrict(value) {
-        const district = String(value || "").trim().replaceAll("台", "臺");
-        return district || "行政區未標示";
-      }
-      function extractItems(payload) {
-        if (Array.isArray(payload)) return payload.filter(item => item && typeof item === "object");
-        if (!payload || typeof payload !== "object") return [];
-        for (const candidate of [payload.data, payload.result, payload.stations, payload.retVal]) {
-          if (Array.isArray(candidate)) return candidate.filter(item => item && typeof item === "object");
-          if (candidate && typeof candidate === "object" && Array.isArray(candidate.data)) return candidate.data;
-        }
-        return [];
-      }
-      function isTaitungStation(item) {
-        const text = [item.county_tw, item.city_tw, item.district_tw, item.address_tw, item.name_tw]
-          .map(value => String(value || "")).join(" ").replaceAll("臺", "台");
-        return String(item.area_code || "") === "15" || text.includes("台東");
-      }
-      function waitMilliseconds(milliseconds) {
-        return new Promise(resolve => win.setTimeout(resolve, milliseconds));
-      }
-      async function fetchJson(url) {
-        const maxAttempts = isMobileRequestMode ? 3 : 2;
-        let lastError = null;
-        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-          const controller = new AbortController();
-          const timeout = win.setTimeout(
-            () => controller.abort(),
-            isMobileRequestMode ? 18000 : 22000,
-          );
-          try {
-            const response = await fetch(url, {
-              cache: "no-store",
-              credentials: "omit",
-              signal: controller.signal,
-            });
-            if (!response.ok) {
-              const error = new Error(`HTTP ${response.status}`);
-              error.retryable = [408, 425, 429, 500, 502, 503, 504].includes(response.status);
-              throw error;
-            }
-            return await response.json();
-          } catch (error) {
-            lastError = error;
-            const networkFailure = error?.name === "AbortError"
-              || error instanceof TypeError
-              || /load failed|failed to fetch|network/i.test(String(error?.message || error));
-            const canRetry = attempt < maxAttempts
-              && (networkFailure || error?.retryable === true);
-            if (!canRetry) throw error;
-            await waitMilliseconds(450 * attempt + Math.floor(Math.random() * 250));
-          } finally {
-            win.clearTimeout(timeout);
-          }
-        }
-        throw lastError || new Error("網路連線失敗");
-      }
-      async function getCatalog() {
-        if (catalogCache) return catalogCache;
-        catalogCache = await batteryService.getCatalog({
-          attempts: isMobileRequestMode ? 3 : 2,
-          timeoutMs: isMobileRequestMode ? 17000 : 14000,
-        });
-        return catalogCache;
-      }
-      function matchCatalogStation(stationName, catalog) {
-        const wantedKey = normalizeStationName(stationName);
-        const exact = catalog.filter(item => normalizeStationName(item.name_tw || item.sna) === wantedKey);
-        if (exact.length === 1) return exact[0];
-        const partial = catalog
-          .map(item => {
-            const candidateKey = normalizeStationName(item.name_tw || item.sna);
-            const matches = wantedKey.length >= 4 && candidateKey.length >= 4
-              && (wantedKey.includes(candidateKey) || candidateKey.includes(wantedKey));
-            const score = matches ? Math.min(wantedKey.length, candidateKey.length) / Math.max(wantedKey.length, candidateKey.length) : 0;
-            return { item, score };
-          })
-          .filter(record => record.score >= .72)
-          .sort((left, right) => right.score - left.score);
-        if (!partial.length) return null;
-        if (partial.length > 1 && partial[1].score >= partial[0].score - .02) return null;
-        return partial[0].item;
-      }
-      async function getBatteryList(stationNo, { force = false } = {}) {
-        return batteryService.getBatteryListByStationNo(stationNo, {
-          force,
-          ttlMs: 45000,
-          attempts: isMobileRequestMode ? 3 : 2,
-          timeoutMs: isMobileRequestMode ? 16000 : 13000,
-        });
-      }
-      async function mapWithAdaptiveConcurrency(items, initialLimit, task, onWave) {
-        const output = new Array(items.length);
-        const maximumLimit = isMobileRequestMode ? 3 : 6;
-        let limit = Math.max(1, Math.min(maximumLimit, initialLimit));
-        let nextIndex = 0;
-        let stableWaves = 0;
-        while (nextIndex < items.length) {
-          const waveIndices = [];
-          while (nextIndex < items.length && waveIndices.length < limit) {
-            waveIndices.push(nextIndex++);
-          }
-          const waveResults = await Promise.all(
-            waveIndices.map(index => task(items[index], index)),
-          );
-          waveIndices.forEach((index, position) => {
-            output[index] = waveResults[position];
-          });
-          const failureCount = waveResults.filter(result => result?.fetchError).length;
-          if (failureCount) {
-            limit = Math.max(1, Math.floor(limit / 2));
-            stableWaves = 0;
-          } else {
-            stableWaves += 1;
-            if (stableWaves >= 2 && limit < maximumLimit) {
-              limit += 1;
-              stableWaves = 0;
-            }
-          }
-          if (typeof onWave === "function") {
-            await onWave({ output, completed: nextIndex, limit, failureCount });
-          }
-          if (nextIndex < items.length) {
-            await waitMilliseconds(isMobileRequestMode ? 80 : 25);
-          }
-        }
-        return output;
-      }
-      function appendTextElement(parent, tagName, className, text) {
-        const element = doc.createElement(tagName);
-        if (className) element.className = className;
-        element.textContent = text;
-        parent.appendChild(element);
-        return element;
-      }
-      function lowBikesFor(result, threshold) {
-        return (Array.isArray(result.bikes) ? result.bikes : [])
-          .filter(bike => bike.battery_power <= threshold);
-      }
-      function priorityBikesFor(result, priorityThreshold) {
-        return (Array.isArray(result.bikes) ? result.bikes : [])
-          .filter(bike => bike.battery_power <= priorityThreshold);
-      }
-      function stationDistanceForResult(result) {
-        if (!userLocation) return null;
-        const latitude = firstFiniteNumber(result.latitude);
-        const longitude = firstFiniteNumber(result.longitude);
-        if (
-          latitude === null || longitude === null
-          || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180
-        ) return null;
-        const distance = distanceMeters(
-          userLocation.latitude,
-          userLocation.longitude,
-          latitude,
-          longitude,
-        );
-        return Number.isFinite(distance) ? distance : null;
-      }
-      function compareStationNames(left, right) {
-        return String(left.name || "").localeCompare(
-          String(right.name || ""),
-          "zh-Hant",
-          { numeric: true, sensitivity: "base" },
-        );
-      }
-      function buildDisplayGroups(threshold, replacementResults) {
-        // replacementResults 已先排除零顆與未配對場站，行政區標題不會留下空群組。
-        const priorityEnabled = prioritySortingEnabled();
-        const priorityThreshold = clampPriorityThreshold(priorityThresholdInput.value);
-        const decorated = replacementResults.map(result => {
-          const priorityBikes = priorityEnabled
-            ? priorityBikesFor(result, priorityThreshold)
-            : [];
-          return {
-            result,
-            distance: stationDistanceForResult(result),
-            priorityCount: priorityBikes.length,
-            lowestPriorityPower: priorityBikes.length
-              ? Math.min(...priorityBikes.map(bike => bike.battery_power))
-              : Number.POSITIVE_INFINITY,
-          };
-        });
-        const comparePriority = (left, right) => {
-          if (!priorityEnabled) return 0;
-          const countDifference = right.priorityCount - left.priorityCount;
-          if (countDifference) return countDifference;
-          if (left.priorityCount && right.priorityCount) {
-            const powerDifference = left.lowestPriorityPower - right.lowestPriorityPower;
-            if (powerDifference) return powerDifference;
-          }
-          return 0;
-        };
-        const requestedMode = normalizeSortMode(sortSelect.value);
-        if (requestedMode === "nearest" && userLocation) {
-          decorated.sort((left, right) => {
-            if (left.result.matched !== right.result.matched) return left.result.matched ? -1 : 1;
-            const priorityDifference = comparePriority(left, right);
-            if (priorityDifference) return priorityDifference;
-            const leftDistance = Number.isFinite(left.distance) ? left.distance : Number.POSITIVE_INFINITY;
-            const rightDistance = Number.isFinite(right.distance) ? right.distance : Number.POSITIVE_INFINITY;
-            const distanceDifference = leftDistance - rightDistance;
-            if (distanceDifference) return distanceDifference;
-            const batteryDifference = lowBikesFor(right.result, threshold).length
-              - lowBikesFor(left.result, threshold).length;
-            return batteryDifference || compareStationNames(left.result, right.result);
-          });
-          return [{
-            mode: "nearest",
-            title: priorityEnabled
-              ? `≤${priorityThreshold}% 優先，再依距離`
-              : "離我最近",
-            total: decorated.reduce(
-              (sum, item) => sum + (item.result.matched ? lowBikesFor(item.result, threshold).length : 0),
-              0,
-            ),
-            priorityBatteryTotal: decorated.reduce((sum, item) => sum + item.priorityCount, 0),
-            priorityStationCount: decorated.filter(item => item.priorityCount > 0).length,
-            items: decorated,
-          }];
-        }
-
-        const districtGroups = new Map();
-        for (const item of decorated) {
-          const district = canonicalDistrict(item.result.district);
-          if (!districtGroups.has(district)) districtGroups.set(district, []);
-          districtGroups.get(district).push(item);
-        }
-        return Array.from(districtGroups.entries())
-          .map(([district, items]) => {
-            items.sort((left, right) => {
-              if (left.result.matched !== right.result.matched) return left.result.matched ? -1 : 1;
-              const priorityDifference = comparePriority(left, right);
-              if (priorityDifference) return priorityDifference;
-              const batteryDifference = lowBikesFor(right.result, threshold).length
-                - lowBikesFor(left.result, threshold).length;
-              return batteryDifference
-                || String(left.result.route || "").localeCompare(String(right.result.route || ""), "zh-Hant", { numeric: true })
-                || compareStationNames(left.result, right.result);
-            });
-            return {
-              mode: "district",
-              title: district,
-              total: items.reduce(
-                (sum, item) => sum + (item.result.matched ? lowBikesFor(item.result, threshold).length : 0),
-                0,
-              ),
-              priorityBatteryTotal: items.reduce((sum, item) => sum + item.priorityCount, 0),
-              priorityStationCount: items.filter(item => item.priorityCount > 0).length,
-              items,
-            };
-          })
-          .sort((left, right) => {
-            if (priorityEnabled) {
-              const batteryDifference = right.priorityBatteryTotal - left.priorityBatteryTotal;
-              if (batteryDifference) return batteryDifference;
-              const stationDifference = right.priorityStationCount - left.priorityStationCount;
-              if (stationDifference) return stationDifference;
-            }
-            return left.title.localeCompare(
-              right.title,
-              "zh-Hant",
-              { numeric: true, sensitivity: "base" },
-            );
-          });
-      }
-      function renderStationCard(item, threshold, mode, isRecommended) {
-        const { result, distance } = item;
-        const priorityThreshold = clampPriorityThreshold(priorityThresholdInput.value);
-        const isPriority = prioritySortingEnabled() && item.priorityCount > 0;
-        const lowBikes = lowBikesFor(result, threshold).sort((left, right) => {
-          const leftPillar = String(left.pillar_no || "").trim();
-          const rightPillar = String(right.pillar_no || "").trim();
-          if (!leftPillar && rightPillar) return 1;
-          if (leftPillar && !rightPillar) return -1;
-          return leftPillar.localeCompare(
-            rightPillar,
-            "zh-Hant",
-            { numeric: true, sensitivity: "base" },
-          ) || left.bike_no.localeCompare(right.bike_no, "zh-Hant", { numeric: true });
-        });
-        // 防禦性檢查：即使上游資料改變，也絕不建立 0 顆場站卡片。
-        if (!result.matched || !lowBikes.length) return;
-
-        const details = doc.createElement("details");
-        details.className = "battery-station";
-        details.classList.toggle("priority", isPriority);
-        const summary = doc.createElement("summary");
-        const heading = doc.createElement("span");
-        heading.className = "battery-station-heading";
-        appendTextElement(heading, "span", "battery-station-name", result.name);
-
-        const meta = doc.createElement("span");
-        meta.className = "battery-station-meta";
-        if (isPriority) {
-          appendTextElement(
-            meta,
-            "span",
-            "battery-priority-badge",
-            `⚠️ ≤${priorityThreshold}%：${item.priorityCount} 顆`,
-          );
-        }
-        if (isRecommended) {
-          appendTextElement(
-            meta,
-            "span",
-            "battery-recommended",
-            isPriority ? "優先推薦" : "最近推薦",
-          );
-        }
-        const metaParts = [String(result.route || "").trim(), canonicalDistrict(result.district)].filter(Boolean);
-        if (mode === "nearest") metaParts.push(formatDistance(distance));
-        meta.appendChild(doc.createTextNode(metaParts.join("｜")));
-        heading.appendChild(meta);
-        summary.appendChild(heading);
-
-        const count = appendTextElement(
-          summary,
-          "span",
-          "battery-count",
-          `需換 ${lowBikes.length} 顆`,
-        );
-        count.classList.add("needs-change");
-        details.appendChild(summary);
-
-        const list = doc.createElement("div");
-        list.className = "battery-bike-list";
-        for (const bike of lowBikes) {
-          const row = doc.createElement("div");
-          row.className = "battery-bike-row";
-          const isPriorityBike = isPriority && bike.battery_power <= priorityThreshold;
-          row.classList.toggle("priority", isPriorityBike);
-          appendTextElement(row, "span", "battery-bike-no", `車號 ${bike.bike_no}`);
-          appendTextElement(
-            row,
-            "span",
-            "battery-power",
-            `${bike.battery_power}%${isPriorityBike ? " ⚠️" : ""}`,
-          );
-          appendTextElement(row, "span", "", bike.pillar_no ? `柱號 ${bike.pillar_no}` : "柱號 —");
-          list.appendChild(row);
-        }
-        details.appendChild(list);
-        resultsNode.appendChild(details);
-      }
-      function renderResults() {
-        const threshold = clampThreshold(thresholdInput.value);
-        thresholdInput.value = String(threshold);
-        const priorityThreshold = clampPriorityThreshold(priorityThresholdInput.value);
-        priorityThresholdInput.value = String(priorityThreshold);
-        const priorityEnabled = prioritySortingEnabled();
-        summaryNode.replaceChildren();
-        districtSummaryGridNode.replaceChildren();
-        districtSummaryNode.hidden = true;
-        resultsNode.replaceChildren();
-        if (!lastResults.length) return;
-
-        // 後續統計與畫面都只使用「確實至少有 1 顆需更換」的場站。
-        const replacementResults = lastResults.filter(
-          result => result.matched && lowBikesFor(result, threshold).length > 0,
-        );
-        const totals = Object.fromEntries(lastResultRoutes.map(route => [route, 0]));
-        const districtTotals = new Map();
-        for (const result of replacementResults) {
-          const lowBatteryCount = lowBikesFor(result, threshold).length;
-          totals[result.route] += lowBatteryCount;
-          const district = canonicalDistrict(result.district);
-          districtTotals.set(district, (districtTotals.get(district) || 0) + lowBatteryCount);
-        }
-        const grandTotal = Object.values(totals).reduce((sum, value) => sum + value, 0);
-        const priorityBatteryTotal = priorityEnabled
-          ? replacementResults.reduce(
-              (sum, result) => sum + priorityBikesFor(result, priorityThreshold).length,
-              0,
-            )
-          : 0;
-        const priorityStationTotal = priorityEnabled
-          ? replacementResults.filter(
-              result => priorityBikesFor(result, priorityThreshold).length > 0,
-            ).length
-          : 0;
-        for (const route of lastResultRoutes) {
-          const metric = doc.createElement("div");
-          metric.className = "battery-metric";
-          appendTextElement(metric, "div", "battery-metric-label", `${route} 需更換`);
-          appendTextElement(metric, "div", "battery-metric-value", `${totals[route] || 0} 顆`);
-          summaryNode.appendChild(metric);
-        }
-        const totalMetric = doc.createElement("div");
-        totalMetric.className = "battery-metric total";
-        appendTextElement(totalMetric, "div", "battery-metric-label", "所選範圍合計");
-        appendTextElement(totalMetric, "div", "battery-metric-value", `${grandTotal} 顆`);
-        summaryNode.appendChild(totalMetric);
-        if (priorityEnabled) {
-          const priorityMetric = doc.createElement("div");
-          priorityMetric.className = "battery-metric priority";
-          appendTextElement(
-            priorityMetric,
-            "div",
-            "battery-metric-label",
-            `⚠️ ≤${priorityThreshold}% 優先`,
-          );
-          appendTextElement(
-            priorityMetric,
-            "div",
-            "battery-metric-value",
-            `${priorityBatteryTotal} 顆／${priorityStationTotal} 站`,
-          );
-          summaryNode.appendChild(priorityMetric);
-        }
-
-        const sortedDistrictTotals = Array.from(districtTotals.entries()).sort(
-          ([leftDistrict], [rightDistrict]) => leftDistrict.localeCompare(
-            rightDistrict,
-            "zh-Hant",
-            { numeric: true, sensitivity: "base" },
-          ),
-        );
-        const highestDistrictTotal = Math.max(0, ...sortedDistrictTotals.map(([, total]) => total));
-        for (const [district, total] of sortedDistrictTotals) {
-          const metric = doc.createElement("div");
-          metric.className = "battery-metric battery-district-metric";
-          if (total === highestDistrictTotal) metric.classList.add("highest");
-          appendTextElement(metric, "div", "battery-metric-label", `${district}｜需更換`);
-          appendTextElement(metric, "div", "battery-metric-value", `${total} 顆`);
-          districtSummaryGridNode.appendChild(metric);
-        }
-        districtSummaryTitleNode.textContent = `📍 各行政區需更換電池｜共 ${grandTotal} 顆`;
-        districtSummaryNode.hidden = !sortedDistrictTotals.length;
-
-        const groups = buildDisplayGroups(threshold, replacementResults);
-        if (!groups.length || groups.every(group => !group.items.length)) {
-          appendTextElement(
-            resultsNode,
-            "div",
-            "battery-empty",
-            `目前所選範圍沒有電量 ≤ ${threshold}%、需要更換的電池。`,
-          );
-          savePreferences();
-          return;
-        }
-        for (const group of groups) {
-          const prioritySuffix = priorityEnabled && group.priorityBatteryTotal
-            ? `｜⚠️ 優先 ${group.priorityBatteryTotal} 顆／${group.priorityStationCount} 站`
-            : "";
-          const title = group.mode === "nearest"
-            ? `${group.title}｜${group.items.length} 個場站${prioritySuffix}`
-            : `${group.title}｜${group.total} 顆需更換${prioritySuffix}`;
-          appendTextElement(resultsNode, "div", "battery-route-title", title);
-          const recommendedIndex = group.mode === "nearest"
-            ? group.items.findIndex(item => Number.isFinite(item.distance) && item.result.matched)
-            : -1;
-          group.items.forEach((item, index) => {
-            renderStationCard(item, threshold, group.mode, index === recommendedIndex);
-          });
-        }
-        savePreferences();
-      }
-      async function runQuery() {
-        const selected = selectedRoutes();
-        if (!selected.length) {
-          setStatus("請至少選擇一個統計範圍。", true);
-          return;
-        }
-        const queryToken = `${fingerprint}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        win.__ubikeBatteryActiveQueryToken = queryToken;
-        refreshButton.disabled = true;
-        refreshButton.textContent = "查詢中…";
-        summaryNode.replaceChildren();
-        districtSummaryGridNode.replaceChildren();
-        districtSummaryNode.hidden = true;
-        resultsNode.replaceChildren();
-        setStatus("正在取得臺東場站與 2.0E 車輛資料……");
-        try {
-          const catalog = await getCatalog();
-          const entries = selected.flatMap(route => (routeStations[route] || []).map(station => ({ ...station, route })));
-          let completed = 0;
-          let lastPartialRenderCount = 0;
-          lastResultRoutes = selected;
-          lastResults = await mapWithAdaptiveConcurrency(
-            entries,
-            isMobileRequestMode ? 3 : 6,
-            async (entry, _index) => {
-              const matched = matchCatalogStation(entry.name, catalog);
-              if (!matched) {
-                completed += 1;
-                setStatus(`已完成 ${completed}／${entries.length} 個場站……`);
-                return { ...entry, matched: false, bikes: [] };
-              }
-              const stationNo = String(matched.station_no || matched.sno || matched.station_id || "").trim();
-              const enrichedEntry = {
-                ...entry,
-                district: String(
-                  entry.district || matched.district_tw || matched.sarea || matched.district || "",
-                ).trim(),
-                latitude: firstFiniteNumber(matched.lat, matched.latitude),
-                longitude: firstFiniteNumber(matched.lng, matched.longitude),
-              };
-              let bikes = [];
-              try { bikes = stationNo ? await getBatteryList(stationNo, { force: true }) : []; }
-              catch (_) { return { ...enrichedEntry, matched: false, bikes: [], fetchError: true }; }
-              finally {
-                completed += 1;
-                setStatus(`已完成 ${completed}／${entries.length} 個場站……`);
-              }
-              return { ...enrichedEntry, matched: true, stationNo, bikes };
-            },
-            async ({ output, completed: waveCompleted, limit, failureCount }) => {
-              if (win.__ubikeBatteryActiveQueryToken !== queryToken) return;
-              const renderStep = isMobileRequestMode ? 6 : 12;
-              const shouldRender = waveCompleted >= entries.length
-                || waveCompleted - lastPartialRenderCount >= renderStep;
-              if (shouldRender) {
-                lastResults = output.filter(Boolean);
-                renderResults();
-                lastPartialRenderCount = waveCompleted;
-              }
-              setStatus(
-                `已完成 ${waveCompleted}／${entries.length} 個場站｜自動並行 ${limit} 站`
-                + `${failureCount ? "｜偵測到連線不穩，已自動降速" : ""}`,
-                false,
-              );
-            },
-          );
-          if (win.__ubikeBatteryActiveQueryToken !== queryToken) return;
-          renderResults();
-          const unmatchedResults = lastResults.filter(
-            result => !result.matched && !result.fetchError,
-          );
-          const unmatchedCount = unmatchedResults.length;
-          const unmatchedNames = unmatchedResults
-            .map(result => String(result.name || "").trim())
-            .filter(Boolean);
-          const fetchErrorCount = lastResults.filter(result => result.fetchError).length;
-          const timeText = new Intl.DateTimeFormat("zh-TW", {
-            timeZone: "Asia/Taipei", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
-          }).format(new Date());
-          setStatus(
-            `更新時間 ${timeText}｜${lastResults.length - unmatchedCount - fetchErrorCount} 個場站完成`
-            + `${unmatchedCount ? `｜${unmatchedCount} 個未配對${unmatchedNames.length ? `：${unmatchedNames.join("、")}` : ""}` : ""}`
-            + `${fetchErrorCount ? `｜${fetchErrorCount} 個場站連線失敗，可再按一次更新` : ""}`
-            + "｜速度已依裝置與網路自動調整",
-            Boolean(fetchErrorCount),
-          );
-        } catch (error) {
-          const rawMessage = String(error?.message || error);
-          const isLoadFailure = error?.name === "AbortError"
-            || /load failed|failed to fetch|networkerror|network request failed/i.test(rawMessage);
-          const message = isLoadFailure
-            ? "手機網路連線中斷或查詢逾時，請縮小查詢範圍後再試。"
-            : rawMessage;
-          setStatus(`電量查詢失敗：${message}`, true);
-        } finally {
-          if (win.__ubikeBatteryActiveQueryToken === queryToken) {
-            refreshButton.disabled = false;
-            refreshButton.textContent = "更新電量";
-          }
-        }
-      }
-      function openPage() {
-        if (!page.classList.contains("open")) {
-          previousBodyOverflow = doc.body.style.overflow;
-          win.__ubikeBatteryPreviousBodyOverflow = previousBodyOverflow;
-        }
-        doc.body.style.overflow = "hidden";
-        page.classList.add("open");
-        page.setAttribute("aria-hidden", "false");
-        page.scrollTop = 0;
-        if (normalizeSortMode(sortSelect.value) === "nearest") {
-          const locationIsStale = !userLocation
-            || Date.now() - Number(userLocation.updatedAt || 0) > 5 * 60 * 1000;
-          if (locationIsStale) requestCurrentLocation({ force: Boolean(userLocation) });
-        }
-      }
-      function closePage() {
-        page.classList.remove("open");
-        page.setAttribute("aria-hidden", "true");
-        doc.body.style.overflow = String(
-          win.__ubikeBatteryPreviousBodyOverflow ?? previousBodyOverflow ?? "",
-        );
-      }
-
-      const preferences = readPreferences();
-      thresholdInput.value = String(clampThreshold(preferences.threshold ?? defaultThreshold));
-      priorityEnabledInput.checked = Boolean(preferences.priority_enabled);
-      priorityThresholdInput.value = String(
-        clampPriorityThreshold(preferences.priority_threshold ?? defaultPriorityThreshold),
-      );
-      sortSelect.value = normalizeSortMode(preferences.sort_mode);
-      for (const route of routes) {
-        const label = doc.createElement("label");
-        label.className = "battery-scope";
-        const input = doc.createElement("input");
-        input.type = "checkbox";
-        input.value = route;
-        input.checked = false;
-        label.classList.toggle("selected", input.checked);
-        label.append(input, doc.createTextNode(route));
-        input.addEventListener("change", () => {
-          label.classList.toggle("selected", input.checked);
-          savePreferences();
-        });
-        scopeList.appendChild(label);
-      }
-      updatePriorityControls();
-      updateSortControls();
-
-      fab.addEventListener("click", openPage);
-      backButton.addEventListener("click", closePage);
-      refreshButton.addEventListener("click", runQuery);
-      locateButton.addEventListener("click", () => requestCurrentLocation({ force: true }));
-      sortSelect.addEventListener("change", () => {
-        sortSelect.value = normalizeSortMode(sortSelect.value);
-        savePreferences();
-        updateSortControls();
-        if (sortSelect.value === "nearest" && !userLocation) requestCurrentLocation();
-        else if (lastResults.length) renderResults();
-      });
-      thresholdInput.addEventListener("change", () => {
-        thresholdInput.value = String(clampThreshold(thresholdInput.value));
-        priorityThresholdInput.value = String(
-          clampPriorityThreshold(priorityThresholdInput.value),
-        );
-        updatePriorityControls();
-        if (lastResults.length) renderResults();
-        else savePreferences();
-      });
-      priorityEnabledInput.addEventListener("change", () => {
-        updatePriorityControls();
-        if (lastResults.length) renderResults();
-        else savePreferences();
-      });
-      priorityThresholdInput.addEventListener("change", () => {
-        priorityThresholdInput.value = String(
-          clampPriorityThreshold(priorityThresholdInput.value),
-        );
-        updatePriorityControls();
-        if (lastResults.length) renderResults();
-        else savePreferences();
-      });
-      win.addEventListener("keydown", event => {
-        if (event.key === "Escape" && page.classList.contains("open")) closePage();
-      });
-
-      if (displayMode === "mobile" || win.matchMedia("(max-width: 700px)").matches) {
-        fab.style.bottom = "calc(312px + env(safe-area-inset-bottom, 0px))";
-      }
-      if (previousPageWasOpen) openPage();
-    })();
-    </script>
-    """
-    component_html = (
-        component_html
-        .replace("__LOW_BATTERY_CLIENT_CORE__", LOW_BATTERY_CLIENT_CORE_JS)
-        .replace("__ROUTE_STATIONS__", route_payload)
-        .replace("__DISPLAY_MODE__", display_mode)
-        .replace("__BATTERY_FINGERPRINT__", battery_fingerprint)
-    )
-    return component_html
+def _build_floating_battery_query_html(*args, **kwargs) -> str:
+    """V30 相容占位；實際渲染已移到 battery_components.py。"""
+    return ""
 
 
 def render_floating_battery_query(
     route_station_map: dict[str, list[dict]],
     mobile_mode: bool,
 ) -> None:
-    """建立懸浮電量入口與全螢幕查詢頁；資料由使用者瀏覽器直讀 YouBike。"""
-    components.html(
-        _build_floating_battery_query_html(route_station_map, mobile_mode),
-        height=0,
-        scrolling=False,
+    """V30：懸浮電量查詢由 Python Server 查 YouBike，所有使用者共用快取。"""
+    render_floating_server_battery(
+        route_station_map,
+        mobile_mode,
+        threshold=DEFAULT_BATTERY_THRESHOLD,
+        priority_threshold=DEFAULT_BATTERY_PRIORITY_THRESHOLD,
     )
 
 def build_battery_route_station_map(status_df: pd.DataFrame) -> dict[str, list[dict]]:
-    """由目前選定配置整理 D1／D2／D3 場站，供 2.0E 電量查詢使用。"""
+    """依 Excel 實際辨識出的區域建立電量查詢範圍，不再寫死 D1/D2/D3。"""
     route_station_map: dict[str, list[dict]] = {}
     if status_df.empty or "場站名稱" not in status_df.columns or "路線區域" not in status_df.columns:
         return route_station_map
 
     seen_by_route: dict[str, set[str]] = {}
-    station_rows = status_df.reindex(
-        columns=["路線區域", "場站名稱", "行政區"]
-    ).itertuples(index=False, name=None)
+    station_rows = status_df.reindex(columns=["路線區域", "場站名稱", "行政區"]).itertuples(index=False, name=None)
+    allowed = {str(zone) for zone in ALL_DISPATCH_ZONES}
     for route_raw, station_name_raw, district_raw in station_rows:
-        route = "" if pd.isna(route_raw) else str(route_raw).strip().upper()
-        station_name = (
-            "" if pd.isna(station_name_raw) else str(station_name_raw).strip()
-        )
+        route_text = "" if pd.isna(route_raw) else str(route_raw).strip()
+        route = normalize_dispatch_zone(route_text) or route_text
+        station_name = "" if pd.isna(station_name_raw) else str(station_name_raw).strip()
         station_key = normalize_youbike_station_key(station_name)
-        if route not in ("D1", "D2", "D3") or not station_key:
+        if route not in allowed or not station_key:
             continue
         route_seen = seen_by_route.setdefault(route, set())
         if station_key in route_seen:
             continue
         route_seen.add(station_key)
-        route_station_map.setdefault(route, []).append(
-            {
-                "name": station_name,
-                "district": "" if pd.isna(district_raw) else str(district_raw).strip(),
-            }
-        )
+        route_station_map.setdefault(route, []).append({
+            "name": station_name,
+            "district": "" if pd.isna(district_raw) else str(district_raw).strip(),
+        })
 
-    return {
-        route: route_station_map[route]
-        for route in ("D1", "D2", "D3")
-        if route_station_map.get(route)
-    }
+    return {zone: route_station_map[zone] for zone in ALL_DISPATCH_ZONES if route_station_map.get(zone)}
 
 
 def merge_battery_route_station_maps(
     primary_map: dict[str, list[dict]],
     fallback_map: dict[str, list[dict]],
 ) -> dict[str, list[dict]]:
-    """上傳配置優先；內建清單只補新配置沒有的場站。"""
+    """上傳 Excel 優先；只有目前區域存在於備援時才補場站，外縣市不混入台東資料。"""
     result: dict[str, list[dict]] = {zone: [] for zone in ALL_DISPATCH_ZONES}
     primary_station_keys: set[str] = set()
     for zone in ALL_DISPATCH_ZONES:
@@ -7473,15 +5334,19 @@ def merge_battery_route_station_maps(
                 continue
             primary_station_keys.add(station_key)
             result[zone].append({"name": station_name, "district": str(item.get("district") or "").strip()})
-    seen = {normalize_youbike_station_key(item["name"]) for items in result.values() for item in items}
-    for zone in ALL_DISPATCH_ZONES:
-        for item in (fallback_map.get(zone, []) if isinstance(fallback_map, dict) else []):
-            station_name = str(item.get("name") or "").strip()
-            station_key = normalize_youbike_station_key(station_name)
-            if not station_key or station_key in primary_station_keys or station_key in seen:
-                continue
-            seen.add(station_key)
-            result[zone].append({"name": station_name, "district": str(item.get("district") or "").strip()})
+
+    # 只有 Excel 本身沒有任何可用站點時才使用同名區域的備援。
+    # 這可保留台東免上傳電量查詢，又避免外縣市 A/B 區被 D1/D2/D3 汙染。
+    if not any(result.values()):
+        seen: set[str] = set()
+        for zone in ALL_DISPATCH_ZONES:
+            for item in (fallback_map.get(zone, []) if isinstance(fallback_map, dict) else []):
+                station_name = str(item.get("name") or "").strip()
+                station_key = normalize_youbike_station_key(station_name)
+                if not station_key or station_key in seen:
+                    continue
+                seen.add(station_key)
+                result[zone].append({"name": station_name, "district": str(item.get("district") or "").strip()})
     return {zone: result[zone] for zone in ALL_DISPATCH_ZONES if result[zone]}
 
 
@@ -7538,10 +5403,14 @@ SHARED_GEOLOCATION_REFRESH_SECONDS = 30
 
 
 def normalize_dispatch_zone(value) -> str | None:
-    """把配置中的路線名稱辨識為 D1／D2／D3。"""
-    normalized = re.sub(r"\s+", "", str(value or "").upper())
-    for zone in ALL_DISPATCH_ZONES:
-        if zone in normalized:
+    """把配置中的區域名稱對到本份 Excel 實際辨識出的區域；不再限定 D1/D2/D3。"""
+    normalized = re.sub(r"\s+", "", str(value or "")).upper()
+    if not normalized:
+        return None
+    ordered_zones = sorted((str(zone) for zone in ALL_DISPATCH_ZONES), key=len, reverse=True)
+    for zone in ordered_zones:
+        zone_normalized = re.sub(r"\s+", "", zone).upper()
+        if normalized == zone_normalized or zone_normalized in normalized:
             return zone
     return None
 
@@ -9348,11 +7217,7 @@ def render_jarvis_voice_assistant(
     context_status: str = "ready",
     context_message: str = "",
 ) -> dict | None:
-    """渲染隱藏式語音助理，並以 Streamlit session state 保存調度 context。
-
-    V28.5 起瀏覽器不再自行保存 120 秒候選資料。ready 狀態由 Python 寫入
-    session state；短暫 rerun／定位更新時可沿用最後一份快照，但語音會先提示更新中。
-    """
+    """賈維斯沿用智慧調度 context；V30 電池資料先由 Server 查好再送到瀏覽器。"""
     if mode not in {"candidate", "active"}:
         return None
 
@@ -9369,6 +7234,29 @@ def render_jarvis_voice_assistant(
     )
 
     if status == "ready" and has_incoming_station:
+        # 只查真正會交給賈維斯的前 10 個候選站；30 秒內所有使用者共用 Server cache。
+        specs: list[dict] = []
+        seen_names: set[str] = set()
+        for plan in ([incoming_plan] + incoming_candidates):
+            name = str(plan.get("station_name") or "").strip()
+            if not name or name in seen_names:
+                continue
+            seen_names.add(name)
+            specs.append({"name": name, "district": str(plan.get("region") or "").strip()})
+        try:
+            server_battery = query_stations_for_ui(
+                specs[:SMART_DISPATCH_CANDIDATE_LIMIT],
+                threshold=min(100, max(0, int(threshold))),
+                priority_threshold=min(int(threshold), max(0, int(priority_threshold))),
+            )
+        except Exception:
+            server_battery = {}
+        for plan in ([incoming_plan] + incoming_candidates):
+            name = str(plan.get("station_name") or "").strip()
+            battery = server_battery.get(name, {}) if name else {}
+            plan["server_battery_bikes"] = list(battery.get("bikes") or [])
+            plan["server_battery_error"] = str(battery.get("error") or "")
+
         snapshot = {
             "mode": mode,
             "current_plan": incoming_plan,
@@ -9377,11 +7265,8 @@ def render_jarvis_voice_assistant(
         }
         st.session_state[server_context_key] = snapshot
     elif status in {"no_candidates", "blocked", "unavailable"}:
-        # 這些是已確認的終態，不應沿用舊目標。
         st.session_state.pop(server_context_key, None)
     elif status == "updating" and not has_incoming_station:
-        # rerun / GPS / 即時車數更新期間保留最後一份伺服器快照，
-        # 但前端會依 context_status 阻止使用者誤用舊資料。
         saved = st.session_state.get(server_context_key)
         if isinstance(saved, dict):
             saved_plan = saved.get("current_plan")
@@ -9398,7 +7283,7 @@ def render_jarvis_voice_assistant(
             default=None,
             mode=mode,
             app_version=APP_VERSION,
-            context_schema_version=5,
+            context_schema_version=6,
             context_status=status,
             context_message=str(context_message or "").strip(),
             candidate_count=min(len(incoming_candidates), SMART_DISPATCH_CANDIDATE_LIMIT),
@@ -9411,7 +7296,6 @@ def render_jarvis_voice_assistant(
         )
         return payload if isinstance(payload, dict) else None
     except Exception as exc:
-        # 語音是測試外掛，任何失敗都不能拖垮原 v27.5 調度流程。
         st.caption(f"賈維斯語音測試元件未啟用：{exc}")
         return None
 
@@ -10881,9 +8765,11 @@ def render_long_distance_route_page(
         "本次智慧調度設定" + ("（任務執行中已鎖定）" if settings_locked else ""),
         expanded=not settings_locked,
     ):
+        supports_taitung_long_distance = set(LONG_DISTANCE_ROUTE_ZONES).issubset(set(ALL_DISPATCH_ZONES))
+        route_mode_options = ["一般模式", "單趟", "來回", "環狀一圈"] if supports_taitung_long_distance else ["一般模式"]
         trip_mode = st.radio(
             "路線模式",
-            ["一般模式", "單趟", "來回", "環狀一圈"],
+            route_mode_options,
             horizontal=True,
             key=f"{settings_prefix}::trip_mode",
             disabled=settings_locked,
@@ -10896,8 +8782,8 @@ def render_long_distance_route_page(
         if trip_mode == "一般模式":
             selected_zones = list(ALL_DISPATCH_ZONES)
             st.caption(
-                "一般模式固定讀取 D1、D2、D3；只使用每 30 秒更新的即時定位安排最高效率場站，"
-                "不建立完整路線或後續站序。"
+                f"一般模式固定讀取目前 Excel 的全部區域（{'、'.join(ALL_DISPATCH_ZONES)}）；"
+                "只使用即時定位安排最高效率場站，不建立完整路線或後續站序。"
             )
         else:
             start_name = st.selectbox(
@@ -11388,11 +9274,11 @@ def render_general_analysis_results_fragment(
                 render_new_window_download_panel(
                     csv_data=csv_data,
                     csv_filename=(
-                        f"{configuration_type}_D1_D2_D3_{selected_shift}_調度分析_彩色標記.csv"
+                        f"{configuration_type}_{'_'.join(ALL_DISPATCH_ZONES)}_{selected_shift}_調度分析_彩色標記.csv"
                     ),
                     excel_data=excel_data,
                     excel_filename=(
-                        f"{configuration_type}_D1_D2_D3_{selected_shift}_調度分析_彩色.xlsx"
+                        f"{configuration_type}_{'_'.join(ALL_DISPATCH_ZONES)}_{selected_shift}_調度分析_彩色.xlsx"
                     ),
                 )
 
@@ -11492,8 +9378,20 @@ except Exception as exc:
     st.stop()
 
 if not options:
-    st.error("找不到可使用的 D1／D2／D3 配置。")
+    st.error("找不到可使用的區域配置。請確認可見工作表中包含『場站名稱』與區域標記。")
     st.stop()
+
+# V30：區域來源改由 Excel 自動發現。台東會是 D1/D2/D3；外縣市可使用自己的區域代碼。
+discovered_zone_names: list[str] = []
+_seen_zone_names: set[str] = set()
+for _sheet_name, _route_name in options:
+    _zone_name = str(_route_name or "").strip()
+    _zone_key = re.sub(r"\s+", "", _zone_name).upper()
+    if _zone_name and _zone_key not in _seen_zone_names:
+        _seen_zone_names.add(_zone_key)
+        discovered_zone_names.append(_zone_name)
+if discovered_zone_names:
+    ALL_DISPATCH_ZONES = tuple(discovered_zone_names)
 
 with st.sidebar:
     st.caption(active_base["name"])
@@ -11527,7 +9425,7 @@ with st.sidebar:
 
 visible_sheet_choices = visible_configuration_sheet_names(options)
 if not visible_sheet_choices:
-    st.error("目前顯示中的工作表沒有可使用的 D1／D2／D3 配置。")
+    st.error("目前顯示中的工作表沒有可使用的區域配置。")
     st.stop()
 
 configuration_state_key = f"configuration_type::{active_base['token']}"
@@ -11585,16 +9483,16 @@ missing_zones = [zone for zone in ALL_DISPATCH_ZONES if zone not in available_zo
 if missing_zones:
     st.error(
         f"目前可見配置組合缺少以下區域：{'、'.join(missing_zones)}。"
-        "系統必須同時讀取 D1、D2、D3。"
+        "系統會依這份 Excel 自動讀取所有辨識到的區域。"
     )
     st.stop()
 
-selected_route = "D1＋D2＋D3"
+selected_route = "＋".join(ALL_DISPATCH_ZONES)
 paired_sheet_signature = "｜".join(
     f"{normalize_dispatch_zone(route) or route}:{sheet_name}"
     for sheet_name, route in configuration_options
 )
-current_context_key = f"{selected_configuration_type}｜D1D2D3整合｜{paired_sheet_signature}｜{selected_shift}"
+current_context_key = f"{selected_configuration_type}｜全區整合｜{paired_sheet_signature}｜{selected_shift}"
 status_cache = load_cached_status(active_base["token"], active_base["expires_at"])
 base_df, combined_station_locations = build_long_distance_status_dataframe(
     active_base=active_base,
@@ -11606,7 +9504,7 @@ base_df, combined_station_locations = build_long_distance_status_dataframe(
 )
 
 if base_df.empty:
-    st.warning("D1、D2、D3 沒有可用場站。")
+    st.warning(f"{'、'.join(ALL_DISPATCH_ZONES)} 沒有可用場站。")
     st.stop()
 
 battery_route_map = merge_battery_route_station_maps(
@@ -11629,7 +9527,7 @@ render_low_battery_threshold_controls(
     page_mode=page_mode,
 )
 render_context_strip(
-    route=f"{selected_configuration_type}｜D1／D2／D3",
+    route=f"{selected_configuration_type}｜{'／'.join(ALL_DISPATCH_ZONES)}",
     shift=selected_shift,
     station_count=len(base_df),
     page_mode=page_mode,
@@ -11840,7 +9738,7 @@ if page_mode == "智慧調度":
     st.stop()
 
 
-# 先選 D1／D2／D3，再依該區域提供可選的行政區，避免一次看到全部 120 個場站。
+# 先選 Excel 自動辨識的區域，再依該區域提供可選的行政區。
 zone_filter_options = ["全部"] + [
     zone for zone in ALL_DISPATCH_ZONES
     if zone in set(base_df["路線區域"].astype(str))
