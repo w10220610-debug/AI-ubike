@@ -120,7 +120,7 @@ def render_floating_server_battery(
  let running=false;
  const reverseStations=new Set();
 
- function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+ function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot',"'":'&#39;'}[c]));}
  function num(v,f=0){const n=Number(v);return Number.isFinite(n)?n:f;}
  function norm(v){return String(v??'').normalize?.('NFKC').toLowerCase().replace(/臺/g,'台').replace(/^(?:youbike|ubike)\s*2\s*[.．]?\s*0\s*e?\s*[_\-－—:：]*\s*/i,'').replace(/公共自行車租賃站/g,'').replace(/[^0-9a-z\u3400-\u9fff]/g,'');}
  function stationKey(r){return String(r?.requested_name||r?.station_name||'');}
@@ -217,9 +217,13 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
      root=doc.createElement('div');root.id=ROOT;
      root.innerHTML=`<button id="ub-v29-fab" aria-label="電量查詢">⚡</button><section id="ub-v29-page" aria-hidden="true"><div class="shell"><header><button id="ub-v29-close">‹ 返回</button><div><h1>⚡ 電量查詢</h1><p>V30 Hybrid｜站號 Server 配對｜逐站回填</p></div></header><main id="ub-v29-main"></main></div></section>`;
      doc.body.appendChild(root);
-     root.querySelector('#ub-v29-fab').onclick=open;
-     root.querySelector('#ub-v29-close').onclick=close;
    }
+   const fab=root.querySelector('#ub-v29-fab');
+   const page=root.querySelector('#ub-v29-page');
+   const closeButton=root.querySelector('#ub-v29-close');
+   if(fab)fab.onclick=open;
+   if(closeButton)closeButton.onclick=close;
+   if(fab&&page&&!page.classList.contains('open'))fab.style.display='';
    let style=doc.getElementById(ROOT+'-style');if(!style){style=doc.createElement('style');style.id=ROOT+'-style';doc.head.appendChild(style);}style.textContent=styleText();
    const subtitle=root.querySelector('header p');if(subtitle)subtitle.textContent='V30 Hybrid｜站號 Server 配對｜逐站回填';
    return root;
