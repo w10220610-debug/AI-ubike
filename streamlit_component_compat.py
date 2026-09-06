@@ -29,6 +29,14 @@ POST_V30_CHANGES: tuple[tuple[str, str], ...] = (
         "2026-09-07",
         "右側懸浮更新改為同時強制更新 YouBike 場站即時資料與目前 GPS 定位。",
     ),
+    (
+        "2026-09-07",
+        "電池查詢新增每站獨立反向按鈕，可改看高於低電門檻、也就是不需要換電池的車號與柱號；反向模式套用明顯不同的綠色表格樣式避免誤判。",
+    ),
+    (
+        "2026-09-07",
+        "電池查詢第二門檻（紅色緊急門檻）預設值由 40% 調整為 69%。",
+    ),
 )
 
 _COMPLETED_GENERATIONS_AFTER_V30 = len(POST_V30_CHANGES) // VERSION_CHANGE_THRESHOLD
