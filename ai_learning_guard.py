@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import html as html_lib
+import json
 import math
+import os
 import re
+import threading
 import time
 import unicodedata
 import uuid
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -27,12 +31,24 @@ SUSPECTED_TOTAL_ABS_DELTA = 8
 MANUAL_EVENT_WINDOW_SECONDS = 30 * 60
 MAX_MANUAL_EVENTS = 500
 MAX_TRANSITION_RECORDS = 50000
+PREDICTION_HORIZON_MINUTES = 60
 
-# Early prediction is deliberately conservative. It only uses records already
-# accepted as natural demand; manual/suspected intervention never contributes.
-# The prediction is a direction/trend signal rather than an invented exact
-# future vehicle count while the sample size is still small.
+# All bases/devices on the same running Streamlit service contribute to this
+# common pool. It is intentionally kept outside any base token so switching
+# phone/tablet/computer does not restart AI learning. Streamlit local disk is
+# still ephemeral across a full redeploy; a remote DB can replace this path
+# later without changing the predictor contract.
+SHARED_POOL_SYNC_SECONDS = 10.0
+SHARED_LEARNING_POOL_PATH = (
+    Path(__file__).resolve().parent / ".base_cache" / "ai_learning_pool.shared.json"
+)
+
 _LATEST_LEARNING_RECORDS: list[dict] = []
+_SHARED_POOL_CACHE: list[dict] = []
+_SHARED_POOL_LAST_CHECK_MONOTONIC = 0.0
+_SHARED_POOL_MTIME_NS: int | None = None
+_SHARED_POOL_LOCK = threading.RLock()
+_PUSHED_RECORD_IDS: set[str] = set()
 
 
 def _station_key(value: object) -> str:
@@ -67,6 +83,146 @@ def _records_by_station(frame: pd.DataFrame) -> dict[str, dict]:
             "ebike": _int_or_none(row.get("2.0E 現況")),
         }
     return output
+
+
+def _record_identity(record: dict) -> str:
+    record_id = str(record.get("record_id") or "").strip()
+    if record_id:
+        return record_id
+    stable = (
+        str(record.get("station_key") or _station_key(record.get("station_name"))),
+        str(record.get("observed_at_epoch") or ""),
+        str(record.get("bike_delta") or ""),
+        str(record.get("ebike_delta") or ""),
+        str(record.get("classification") or ""),
+        str(record.get("source_event_id") or ""),
+    )
+    return "legacy:" + "|".join(stable)
+
+
+def _sort_trim_records(records: list[dict] | None) -> list[dict]:
+    deduped: dict[str, dict] = {}
+    for item in records or []:
+        if not isinstance(item, dict):
+            continue
+        deduped[_record_identity(item)] = dict(item)
+
+    def sort_key(item: dict) -> tuple[float, str]:
+        try:
+            observed = float(item.get("observed_at_epoch") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            observed = 0.0
+        return observed, _record_identity(item)
+
+    return sorted(deduped.values(), key=sort_key)[-MAX_TRANSITION_RECORDS:]
+
+
+def _read_shared_pool(*, force: bool = False) -> list[dict]:
+    global _SHARED_POOL_CACHE, _SHARED_POOL_LAST_CHECK_MONOTONIC, _SHARED_POOL_MTIME_NS
+
+    now_mono = time.monotonic()
+    with _SHARED_POOL_LOCK:
+        if (
+            not force
+            and _SHARED_POOL_CACHE
+            and now_mono - _SHARED_POOL_LAST_CHECK_MONOTONIC < SHARED_POOL_SYNC_SECONDS
+        ):
+            return [dict(item) for item in _SHARED_POOL_CACHE]
+
+        _SHARED_POOL_LAST_CHECK_MONOTONIC = now_mono
+        try:
+            current_mtime_ns = SHARED_LEARNING_POOL_PATH.stat().st_mtime_ns
+        except OSError:
+            current_mtime_ns = None
+
+        if (
+            not force
+            and _SHARED_POOL_CACHE
+            and current_mtime_ns is not None
+            and current_mtime_ns == _SHARED_POOL_MTIME_NS
+        ):
+            return [dict(item) for item in _SHARED_POOL_CACHE]
+
+        try:
+            raw = json.loads(SHARED_LEARNING_POOL_PATH.read_text(encoding="utf-8"))
+            records = raw.get("records", []) if isinstance(raw, dict) else []
+            loaded = _sort_trim_records(records if isinstance(records, list) else [])
+        except (OSError, ValueError, TypeError):
+            loaded = []
+
+        _SHARED_POOL_CACHE = loaded
+        _SHARED_POOL_MTIME_NS = current_mtime_ns
+        return [dict(item) for item in loaded]
+
+
+def _write_shared_pool(records: list[dict]) -> list[dict]:
+    global _SHARED_POOL_CACHE, _SHARED_POOL_LAST_CHECK_MONOTONIC, _SHARED_POOL_MTIME_NS
+
+    normalized = _sort_trim_records(records)
+    SHARED_LEARNING_POOL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "updated_at_epoch": time.time(),
+        "max_records": MAX_TRANSITION_RECORDS,
+        "records": normalized,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    temp_path = SHARED_LEARNING_POOL_PATH.with_name(
+        f".{SHARED_LEARNING_POOL_PATH.name}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        temp_path.write_text(encoded, encoding="utf-8")
+        os.replace(temp_path, SHARED_LEARNING_POOL_PATH)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    try:
+        _SHARED_POOL_MTIME_NS = SHARED_LEARNING_POOL_PATH.stat().st_mtime_ns
+    except OSError:
+        _SHARED_POOL_MTIME_NS = None
+    _SHARED_POOL_CACHE = normalized
+    _SHARED_POOL_LAST_CHECK_MONOTONIC = time.monotonic()
+    return [dict(item) for item in normalized]
+
+
+def sync_shared_learning_pool(
+    incoming_records: list[dict] | None = None,
+    *,
+    force_read: bool = False,
+) -> list[dict]:
+    """Silently merge local learning into the device-shared AI pool.
+
+    This function is called automatically during learning writes and prediction
+    rendering. There is no user-facing sync button: each normal Streamlit rerun
+    performs a lightweight pool check, while new samples are pushed immediately.
+    """
+    global _LATEST_LEARNING_RECORDS
+
+    with _SHARED_POOL_LOCK:
+        existing = _read_shared_pool(force=force_read)
+        incoming = [dict(item) for item in (incoming_records or []) if isinstance(item, dict)]
+        if incoming:
+            merged = _sort_trim_records([*existing, *incoming])
+            existing_ids = {_record_identity(item) for item in existing}
+            merged_ids = {_record_identity(item) for item in merged}
+            if merged_ids != existing_ids:
+                shared = _write_shared_pool(merged)
+            else:
+                shared = merged
+        else:
+            shared = existing
+
+        _LATEST_LEARNING_RECORDS = [dict(item) for item in shared]
+        try:
+            st.session_state["__ai_prediction_records__"] = [dict(item) for item in shared]
+            st.session_state["__ai_shared_pool_count__"] = len(shared)
+            st.session_state["__ai_shared_pool_synced_at__"] = time.time()
+        except Exception:
+            pass
+        return [dict(item) for item in shared]
 
 
 def build_manual_intervention_event(
@@ -134,6 +290,9 @@ def classify_live_transition(
       dispatcher-decision learning.
     suspected_intervention: conservatively excluded pending future review.
     baseline/incomplete: not a usable transition sample.
+
+    elapsed_seconds is also recorded from the previous live observation so the
+    predictor can normalize each change to a real 60-minute rate.
     """
     observed_at = float(observed_at_epoch or time.time())
     context = dict(ai_context or {})
@@ -142,6 +301,21 @@ def classify_live_transition(
     current = _records_by_station(current_df)
     records: list[dict] = []
 
+    try:
+        last_observed_map = st.session_state.setdefault("__ai_last_observed_by_station__", {})
+        if not isinstance(last_observed_map, dict):
+            last_observed_map = {}
+            st.session_state["__ai_last_observed_by_station__"] = last_observed_map
+    except Exception:
+        last_observed_map = {}
+
+    context_prefix = "|".join(
+        (
+            str(context.get("operating_date") or ""),
+            str(context.get("shift") or ""),
+        )
+    )
+
     for station_key, current_item in current.items():
         previous_item = previous.get(station_key)
         station_name = current_item["station_name"]
@@ -149,6 +323,18 @@ def classify_live_transition(
         current_ebike = current_item["ebike"]
         previous_bike = previous_item.get("bike") if previous_item else None
         previous_ebike = previous_item.get("ebike") if previous_item else None
+
+        timing_key = f"{context_prefix}|{station_key}"
+        try:
+            previous_observed_at = float(last_observed_map.get(timing_key) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            previous_observed_at = 0.0
+        elapsed_seconds: float | None = None
+        if previous_observed_at > 0:
+            elapsed = observed_at - previous_observed_at
+            if 5.0 <= elapsed <= 4 * 60 * 60:
+                elapsed_seconds = float(elapsed)
+        last_observed_map[timing_key] = observed_at
 
         classification = "natural"
         review_status = "accepted"
@@ -194,6 +380,7 @@ def classify_live_transition(
                 "record_id": uuid.uuid4().hex,
                 "source_event_id": str(source_event_id or ""),
                 "observed_at_epoch": observed_at,
+                "elapsed_seconds": elapsed_seconds,
                 "operating_date": str(context.get("operating_date") or ""),
                 "day_type": str(context.get("day_type") or ""),
                 "shift": str(context.get("shift") or ""),
@@ -228,25 +415,36 @@ def classify_live_transition(
 
 
 def trim_learning_records(records: list[dict] | None) -> list[dict]:
-    """Keep the newest learning records and refresh the in-process predictor."""
-    global _LATEST_LEARNING_RECORDS
-    trimmed = [dict(item) for item in (records or []) if isinstance(item, dict)][-MAX_TRANSITION_RECORDS:]
-    _LATEST_LEARNING_RECORDS = trimmed
-    try:
-        st.session_state["__ai_prediction_records__"] = trimmed
-    except Exception:
-        pass
-    return trimmed
+    """Keep local history while silently pushing new samples to the shared pool."""
+    global _LATEST_LEARNING_RECORDS, _PUSHED_RECORD_IDS
+
+    local_trimmed = _sort_trim_records(records)
+    new_for_shared: list[dict] = []
+    for item in local_trimmed:
+        identity = _record_identity(item)
+        if identity in _PUSHED_RECORD_IDS:
+            continue
+        _PUSHED_RECORD_IDS.add(identity)
+        new_for_shared.append(item)
+
+    shared = sync_shared_learning_pool(new_for_shared)
+    _LATEST_LEARNING_RECORDS = [dict(item) for item in shared]
+    return local_trimmed
 
 
 def _prediction_records() -> list[dict]:
+    # Default background synchronization: prediction rendering checks the
+    # shared file at most once per SHARED_POOL_SYNC_SECONDS, without any button.
+    shared = sync_shared_learning_pool()
+    if shared:
+        return shared
     try:
         session_records = st.session_state.get("__ai_prediction_records__", [])
     except Exception:
         session_records = []
     if isinstance(session_records, list) and session_records:
         return [item for item in session_records if isinstance(item, dict)]
-    return _LATEST_LEARNING_RECORDS
+    return [dict(item) for item in _LATEST_LEARNING_RECORDS]
 
 
 def _direction(value: float) -> str:
@@ -257,24 +455,30 @@ def _direction(value: float) -> str:
     return "→"
 
 
+def _bounded_hourly_rate(delta: float, elapsed_seconds: float) -> float:
+    if elapsed_seconds <= 0:
+        return 0.0
+    rate = float(delta) * 3600.0 / float(elapsed_seconds)
+    # One bad refresh must not dominate the forecast. Manual/suspected samples
+    # are already excluded; this final cap protects against abnormal intervals.
+    return max(-40.0, min(40.0, rate))
+
+
 def build_early_prediction(
     station_name: str,
     *,
     records: list[dict] | None = None,
     ai_context: dict | None = None,
     now_epoch: float | None = None,
+    current_bike: int | None = None,
+    current_ebike: int | None = None,
 ) -> dict:
-    """Return a conservative early trend prediction for one station.
-
-    Records are weighted by matching day type/shift and nearby hour. This is an
-    early statistical predictor, not a trained ML model, so it exposes sample
-    count and confidence instead of pretending to know an exact future count.
-    """
+    """Predict the station state 60 minutes ahead from natural-demand history."""
     station_key = _station_key(station_name)
     context = dict(ai_context or {})
     now_ts = float(now_epoch or time.time())
     now_hour = time.localtime(now_ts).tm_hour
-    usable: list[tuple[dict, float]] = []
+    usable: list[tuple[dict, float, float, float]] = []
 
     for record in (records if records is not None else _prediction_records()):
         if not isinstance(record, dict):
@@ -289,9 +493,14 @@ def build_early_prediction(
             natural_weight = 0.0
         if natural_weight <= 0:
             continue
+
         bike_delta = record.get("bike_delta")
         ebike_delta = record.get("ebike_delta")
-        if bike_delta is None or ebike_delta is None:
+        try:
+            elapsed_seconds = float(record.get("elapsed_seconds") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            elapsed_seconds = 0.0
+        if bike_delta is None or ebike_delta is None or not (5.0 <= elapsed_seconds <= 4 * 60 * 60):
             continue
 
         weight = natural_weight
@@ -317,7 +526,9 @@ def build_early_prediction(
         except (TypeError, ValueError, OSError):
             pass
 
-        usable.append((record, weight))
+        bike_hourly = _bounded_hourly_rate(float(bike_delta), elapsed_seconds)
+        ebike_hourly = _bounded_hourly_rate(float(ebike_delta), elapsed_seconds)
+        usable.append((record, weight, bike_hourly, ebike_hourly))
 
     if not usable:
         return {
@@ -326,12 +537,12 @@ def build_early_prediction(
             "confidence": "學習中",
             "bike_direction": "→",
             "ebike_direction": "→",
-            "label": "🔮 AI 預測：學習中",
+            "label": "🔮 60分鐘預測：學習中",
         }
 
-    total_weight = sum(weight for _, weight in usable) or 1.0
-    bike_mean = sum(float(record.get("bike_delta") or 0) * weight for record, weight in usable) / total_weight
-    ebike_mean = sum(float(record.get("ebike_delta") or 0) * weight for record, weight in usable) / total_weight
+    total_weight = sum(weight for _, weight, _, _ in usable) or 1.0
+    bike_60m_delta = sum(bike_rate * weight for _, weight, bike_rate, _ in usable) / total_weight
+    ebike_60m_delta = sum(ebike_rate * weight for _, weight, _, ebike_rate in usable) / total_weight
     sample_count = len(usable)
 
     if sample_count < 5:
@@ -341,20 +552,33 @@ def build_early_prediction(
     else:
         confidence = "高"
 
-    bike_direction = _direction(bike_mean)
-    ebike_direction = _direction(ebike_mean)
-    label = (
-        f"🔮 AI 早期預測：2.0 {bike_direction}｜2.0E {ebike_direction}｜"
-        f"信心{confidence}・{sample_count}筆"
-    )
+    bike_direction = _direction(bike_60m_delta)
+    ebike_direction = _direction(ebike_60m_delta)
+
+    if current_bike is not None and current_ebike is not None:
+        bike_future = max(0, int(round(float(current_bike) + bike_60m_delta)))
+        ebike_future = max(0, int(round(float(current_ebike) + ebike_60m_delta)))
+        label = (
+            f"🔮 60分鐘預測：2.0 約{bike_future}台 {bike_direction}｜"
+            f"2.0E 約{ebike_future}台 {ebike_direction}｜"
+            f"信心{confidence}・{sample_count}筆"
+        )
+    else:
+        label = (
+            f"🔮 60分鐘預測：2.0 {bike_60m_delta:+.1f} {bike_direction}｜"
+            f"2.0E {ebike_60m_delta:+.1f} {ebike_direction}｜"
+            f"信心{confidence}・{sample_count}筆"
+        )
+
     return {
         "ready": True,
         "samples": sample_count,
         "confidence": confidence,
+        "horizon_minutes": PREDICTION_HORIZON_MINUTES,
         "bike_direction": bike_direction,
         "ebike_direction": ebike_direction,
-        "bike_mean_delta": bike_mean,
-        "ebike_mean_delta": ebike_mean,
+        "bike_60m_delta": bike_60m_delta,
+        "ebike_60m_delta": ebike_60m_delta,
         "label": label,
     }
 
@@ -376,12 +600,27 @@ def _replace_analysis_prediction_labels(body: str) -> str:
         r'(<small class="analysis-ai-prediction"[^>]*>)(.*?)(</small>)',
         flags=re.DOTALL,
     )
+    current_pattern = re.compile(r'<small>目前\s*([^／<]+)／標準', flags=re.DOTALL)
+
+    def parse_current(value: str) -> int | None:
+        try:
+            return max(0, int(float(html_lib.unescape(value).strip())))
+        except (TypeError, ValueError, OverflowError):
+            return None
 
     def replace_row(match: re.Match) -> str:
         row_html = match.group(1)
         station_name = html_lib.unescape(match.group("station"))
-        prediction = build_early_prediction(station_name, ai_context=context)
-        safe_label = html_lib.escape(str(prediction.get("label") or "🔮 AI 預測：學習中"))
+        current_values = current_pattern.findall(row_html)
+        current_bike = parse_current(current_values[0]) if len(current_values) >= 1 else None
+        current_ebike = parse_current(current_values[1]) if len(current_values) >= 2 else None
+        prediction = build_early_prediction(
+            station_name,
+            ai_context=context,
+            current_bike=current_bike,
+            current_ebike=current_ebike,
+        )
+        safe_label = html_lib.escape(str(prediction.get("label") or "🔮 60分鐘預測：學習中"))
         return marker_pattern.sub(lambda m: f"{m.group(1)}{safe_label}{m.group(3)}", row_html, count=1)
 
     return row_pattern.sub(replace_row, body)
@@ -402,5 +641,12 @@ def _install_prediction_markdown_patch() -> None:
     st.markdown = prediction_markdown
     st._ubike_ai_prediction_markdown_installed = True
 
+
+# Load the shared pool immediately when the app starts. Subsequent reads are
+# throttled and silent, so prediction learning stays synchronized by default.
+try:
+    sync_shared_learning_pool(force_read=True)
+except Exception:
+    pass
 
 _install_prediction_markdown_patch()
