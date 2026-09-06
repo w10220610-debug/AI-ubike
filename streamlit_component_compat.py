@@ -37,6 +37,10 @@ POST_V30_CHANGES: tuple[tuple[str, str], ...] = (
         "2026-09-07",
         "電池查詢第二門檻（紅色緊急門檻）預設值由 40% 調整為 69%。",
     ),
+    (
+        "2026-09-07",
+        "進入全螢幕電量查詢時暫時隱藏右側懸浮工具與賈維斯狀態浮層，返回主畫面後自動恢復，避免手機畫面被遮擋。",
+    ),
 )
 
 _COMPLETED_GENERATIONS_AFTER_V30 = len(POST_V30_CHANGES) // VERSION_CHANGE_THRESHOLD
@@ -174,19 +178,44 @@ def _module_safe_declare_component(
 
 
 def _combined_refresh_component_html(body, *args, **kwargs):
-    """Make the existing floating live refresh also request a fresh GPS fix."""
-    if isinstance(body, str) and 'refreshUrl.searchParams.set("live_refresh", String(Date.now()));' in body:
-        body = body.replace(
-            'refreshUrl.searchParams.set("live_refresh", String(Date.now()));',
-            'const combinedRefreshToken = String(Date.now());\n'
-            '                        refreshUrl.searchParams.set("live_refresh", combinedRefreshToken);\n'
-            '                        refreshUrl.searchParams.set("location_refresh", combinedRefreshToken);',
-            1,
-        )
-        body = body.replace(
-            "正在重新同步 YouBike 即時資料…",
-            "正在更新場站資料與定位…",
-        )
+    """Apply maintained browser-side compatibility patches to legacy HTML."""
+    if isinstance(body, str):
+        if 'refreshUrl.searchParams.set("live_refresh", String(Date.now()));' in body:
+            body = body.replace(
+                'refreshUrl.searchParams.set("live_refresh", String(Date.now()));',
+                'const combinedRefreshToken = String(Date.now());\n'
+                '                        refreshUrl.searchParams.set("live_refresh", combinedRefreshToken);\n'
+                '                        refreshUrl.searchParams.set("location_refresh", combinedRefreshToken);',
+                1,
+            )
+            body = body.replace(
+                "正在重新同步 YouBike 即時資料…",
+                "正在更新場站資料與定位…",
+            )
+
+        if "const ROOT='ubike-battery-v29-upgrade';" in body:
+            body = body.replace(
+                " const ROOT='ubike-battery-v29-upgrade';",
+                " const ROOT='ubike-battery-v29-upgrade';\n"
+                " const FLOAT_HIDE_STYLE_ID='ubike-battery-float-hide-style';\n"
+                " function setBatteryModalFloatingHidden(hidden){\n"
+                "   let style=doc.getElementById(FLOAT_HIDE_STYLE_ID);\n"
+                "   if(!style){style=doc.createElement('style');style.id=FLOAT_HIDE_STYLE_ID;style.textContent='html.ubike-battery-modal-open #ubike-float-tools,html.ubike-battery-modal-open #jarvis-voice-indicator{display:none!important;}';doc.head.appendChild(style);}\n"
+                "   doc.documentElement.classList.toggle('ubike-battery-modal-open',Boolean(hidden));\n"
+                " }",
+                1,
+            )
+            body = body.replace(
+                "function open(){const root=ensure(),page=root.querySelector('#ub-v29-page');root.querySelector('#ub-v29-fab').style.display='none';",
+                "function open(){const root=ensure(),page=root.querySelector('#ub-v29-page');setBatteryModalFloatingHidden(true);root.querySelector('#ub-v29-fab').style.display='none';",
+                1,
+            )
+            body = body.replace(
+                "doc.body.style.overflow=root._bodyOverflow||'';reverseStations.clear();}",
+                "doc.body.style.overflow=root._bodyOverflow||'';setBatteryModalFloatingHidden(false);reverseStations.clear();}",
+                1,
+            )
+
     return _ORIGINAL_COMPONENT_HTML(body, *args, **kwargs)
 
 
