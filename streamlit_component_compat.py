@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Compatibility helpers shared by the maintained V30 entrypoint and legacy UI.
+"""Compatibility helpers shared by the maintained entrypoint and legacy UI.
 
 This module provides three focused compatibility layers:
 1. safe Streamlit v1 component declaration for legacy ``exec()`` code;
@@ -40,6 +40,10 @@ POST_V30_CHANGES: tuple[tuple[str, str], ...] = (
     (
         "2026-09-07",
         "進入全螢幕電量查詢時暫時隱藏右側懸浮工具與賈維斯狀態浮層，返回主畫面後自動恢復，避免手機畫面被遮擋。",
+    ),
+    (
+        "2026-09-07",
+        "按下右側懸浮更新時先記住目前頁面捲動位置；場站與 GPS 同步造成頁面重跑後自動回到原位置，不再跳回頁首。",
     ),
 )
 
@@ -177,6 +181,116 @@ def _module_safe_declare_component(
     return component
 
 
+_SCROLL_KEEPER_SCRIPT = r'''
+<script>
+(() => {
+  const win = window.parent;
+  const doc = win.document;
+  const GLOBAL_KEY = '__ubikeRefreshScrollKeeperV1';
+  const STORAGE_PREFIX = 'ubike-refresh-scroll-v1:';
+  const state = win[GLOBAL_KEY] || (win[GLOBAL_KEY] = { listenerInstalled: false });
+
+  function storageKey() {
+    try {
+      const url = new URL(win.location.href);
+      return STORAGE_PREFIX + url.pathname + ':' + (url.searchParams.get('base') || 'default');
+    } catch (_) {
+      return STORAGE_PREFIX + 'default';
+    }
+  }
+
+  function scrollTargets() {
+    return [
+      ['scrollingElement', doc.scrollingElement],
+      ['documentElement', doc.documentElement],
+      ['body', doc.body],
+      ['appView', doc.querySelector('[data-testid="stAppViewContainer"]')],
+      ['stMain', doc.querySelector('[data-testid="stMain"]')],
+      ['sectionMain', doc.querySelector('section.main')],
+      ['stApp', doc.querySelector('.stApp')],
+    ].filter((item, index, all) => item[1] && all.findIndex(other => other[1] === item[1]) === index);
+  }
+
+  function savePosition() {
+    const snapshot = {
+      at: Date.now(),
+      windowX: Number(win.scrollX || 0),
+      windowY: Number(win.scrollY || 0),
+      targets: {},
+    };
+    for (const [name, target] of scrollTargets()) {
+      snapshot.targets[name] = {
+        top: Number(target.scrollTop || 0),
+        left: Number(target.scrollLeft || 0),
+      };
+    }
+    try {
+      win.sessionStorage.setItem(storageKey(), JSON.stringify(snapshot));
+    } catch (_) {}
+  }
+
+  function readPosition() {
+    try {
+      const raw = win.sessionStorage.getItem(storageKey());
+      if (!raw) return null;
+      const value = JSON.parse(raw);
+      if (!value || Date.now() - Number(value.at || 0) > 30000) {
+        win.sessionStorage.removeItem(storageKey());
+        return null;
+      }
+      return value;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function applyPosition(snapshot) {
+    if (!snapshot) return;
+    for (const [name, target] of scrollTargets()) {
+      const saved = snapshot.targets && snapshot.targets[name];
+      if (!saved) continue;
+      try {
+        target.scrollTop = Number(saved.top || 0);
+        target.scrollLeft = Number(saved.left || 0);
+      } catch (_) {}
+    }
+    try {
+      win.scrollTo(Number(snapshot.windowX || 0), Number(snapshot.windowY || 0));
+    } catch (_) {}
+  }
+
+  function restorePosition() {
+    const snapshot = readPosition();
+    if (!snapshot) return;
+    [0, 80, 220, 500, 900, 1400].forEach(delay => {
+      win.setTimeout(() => applyPosition(snapshot), delay);
+    });
+    win.setTimeout(() => {
+      try {
+        const latest = JSON.parse(win.sessionStorage.getItem(storageKey()) || 'null');
+        if (latest && Number(latest.at || 0) === Number(snapshot.at || 0)) {
+          win.sessionStorage.removeItem(storageKey());
+        }
+      } catch (_) {}
+    }, 3000);
+  }
+
+  if (!state.listenerInstalled) {
+    doc.addEventListener('click', event => {
+      const button = event.target && event.target.closest
+        ? event.target.closest('#ubike-float-tools .uft-refresh')
+        : null;
+      if (button) savePosition();
+    }, true);
+    state.listenerInstalled = true;
+  }
+
+  restorePosition();
+})();
+</script>
+'''
+
+
 def _combined_refresh_component_html(body, *args, **kwargs):
     """Apply maintained browser-side compatibility patches to legacy HTML."""
     if isinstance(body, str):
@@ -192,6 +306,12 @@ def _combined_refresh_component_html(body, *args, **kwargs):
                 "正在重新同步 YouBike 即時資料…",
                 "正在更新場站資料與定位…",
             )
+
+        if 'refreshButton.addEventListener("click", requestManualSync);' in body:
+            if "</body>" in body:
+                body = body.replace("</body>", _SCROLL_KEEPER_SCRIPT + "</body>", 1)
+            else:
+                body += _SCROLL_KEEPER_SCRIPT
 
         if "const ROOT='ubike-battery-v29-upgrade';" in body:
             body = body.replace(
