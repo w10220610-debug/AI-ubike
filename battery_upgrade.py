@@ -120,7 +120,7 @@ def render_floating_server_battery(
  let running=false;
  const reverseStations=new Set();
 
- function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot',"'":'&#39;'}[c]));}
+ function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
  function num(v,f=0){const n=Number(v);return Number.isFinite(n)?n:f;}
  function norm(v){return String(v??'').normalize?.('NFKC').toLowerCase().replace(/臺/g,'台').replace(/^(?:youbike|ubike)\s*2\s*[.．]?\s*0\s*e?\s*[_\-－—:：]*\s*/i,'').replace(/公共自行車租賃站/g,'').replace(/[^0-9a-z\u3400-\u9fff]/g,'');}
  function stationKey(r){return String(r?.requested_name||r?.station_name||'');}
