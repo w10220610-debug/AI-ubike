@@ -49,6 +49,10 @@ POST_V30_CHANGES: tuple[tuple[str, str], ...] = (
         "2026-09-07",
         "配置類型改為可複選的選單：使用者直接選擇要載入的可見 Excel 配置頁；取消自動搭配／綁定其他區域，並移除重複的「調度區域」篩選，分析範圍直接跟配置選擇同步，行政區篩選保留。",
     ),
+    (
+        "2026-09-07",
+        "配置類型新增「細分區域」選單：當同一張配置頁同時包含 D2、D3 等多個區域時，可再獨立勾選實際要分析的區域；一般分析、智慧調度與電池查詢都跟著細分範圍同步。",
+    ),
 )
 
 _COMPLETED_GENERATIONS_AFTER_V30 = len(POST_V30_CHANGES) // VERSION_CHANGE_THRESHOLD
@@ -534,18 +538,54 @@ def _configuration_multiselect(label, options, *args, **kwargs):
         original_zones = tuple(namespace.get("ALL_DISPATCH_ZONES", ()))
         selected_set = set(selected)
         if callable(normalize):
-            covered = {
+            covered_set = {
                 normalize(route)
                 for sheet_name, route in legacy_options
-                if str(sheet_name) in selected_set
+                if str(sheet_name) in selected_set and normalize(route)
             }
-            selected_zones = [zone for zone in original_zones if zone in covered]
+            covered_zones = [zone for zone in original_zones if zone in covered_set]
             for sheet_name, route in legacy_options:
                 if str(sheet_name) not in selected_set:
                     continue
                 zone = normalize(route)
-                if zone and zone not in selected_zones:
-                    selected_zones.append(zone)
+                if zone and zone not in covered_zones:
+                    covered_zones.append(zone)
+
+            if len(covered_zones) > 1:
+                zone_signature = "｜".join(selected)
+                zone_key = f"{multi_key}::fine_zones::{zone_signature}"
+                existing_zone_selection = st.session_state.get(zone_key)
+                if isinstance(existing_zone_selection, (list, tuple)):
+                    zone_default = [
+                        str(zone)
+                        for zone in existing_zone_selection
+                        if str(zone) in covered_zones
+                    ]
+                else:
+                    zone_default = list(covered_zones)
+                if not zone_default:
+                    zone_default = list(covered_zones)
+
+                selected_zones = _ORIGINAL_MULTISELECT(
+                    "細分區域",
+                    covered_zones,
+                    default=zone_default,
+                    key=zone_key,
+                    help=(
+                        "當同一張配置表同時包含多個區域時，可在這裡再細分。"
+                        "例如「115 D2、D3 平假日」可只選 D2、只選 D3，或 D2＋D3。"
+                        "若全部取消，系統會暫時視為全部區域，避免分析範圍變成空白。"
+                    ),
+                    placeholder="選擇實際要分析的區域",
+                )
+                selected_zones = [
+                    str(zone) for zone in selected_zones if str(zone) in covered_zones
+                ]
+                if not selected_zones:
+                    selected_zones = list(covered_zones)
+                    st.caption("細分區域未選擇時，暫時使用目前配置內的全部區域。")
+            else:
+                selected_zones = list(covered_zones)
 
             if selected_zones:
                 namespace["ALL_DISPATCH_ZONES"] = tuple(selected_zones)
