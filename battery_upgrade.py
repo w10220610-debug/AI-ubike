@@ -211,22 +211,59 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
 .station.reverse{background:linear-gradient(145deg,rgba(8,48,43,.98),rgba(8,35,38,.98));border:2px solid rgba(76,239,172,.85);box-shadow:0 0 0 1px rgba(65,255,181,.10),0 0 22px rgba(34,224,150,.14)}.station.reverse summary{background:linear-gradient(90deg,rgba(38,172,116,.12),rgba(47,235,164,.04))}.station.reverse summary small{color:#8ff0c6}.station.reverse .bike-list{border-top-color:rgba(76,239,172,.34)}.reverse-min{min-width:72px;background:#155540;color:#baffdf;border:1px solid rgba(85,239,177,.35);font-size:12px}.reverse-banner{margin:1px 0 8px;padding:9px 10px;border:1px solid rgba(81,241,177,.45);border-radius:10px;background:rgba(32,151,104,.14);color:#b9ffe0;font-weight:900;font-size:13px}.bike.safe,.bike.safe strong{color:#83f2c2;font-weight:850}.reverse-empty{padding:15px 4px;text-align:center;color:#91d9bc;font-weight:750}
 @media(max-width:560px){.controls{grid-template-columns:1fr}.shell{padding-left:10px;padding-right:10px}.bike{grid-template-columns:65px 1fr 48px}.station summary{grid-template-columns:minmax(0,1fr) 38px auto;gap:7px;padding:12px 10px}.reverse-toggle{width:36px;height:34px}.min{padding:7px 7px}.reverse-min{min-width:65px;font-size:11px}}
 `;}
+ function createRoot(){
+   const root=doc.createElement('div');root.id=ROOT;
+   root.innerHTML=`<button id="ub-v29-fab" aria-label="電量查詢">⚡</button><section id="ub-v29-page" aria-hidden="true"><div class="shell"><header><button id="ub-v29-close">‹ 返回</button><div><h1>⚡ 電量查詢</h1><p>V30 Hybrid｜站號 Server 配對｜逐站回填</p></div></header><main id="ub-v29-main"></main></div></section>`;
+   doc.body.appendChild(root);
+   return root;
+ }
  function ensure(){
    let root=doc.getElementById(ROOT);
-   if(!root){
-     root=doc.createElement('div');root.id=ROOT;
-     root.innerHTML=`<button id="ub-v29-fab" aria-label="電量查詢">⚡</button><section id="ub-v29-page" aria-hidden="true"><div class="shell"><header><button id="ub-v29-close">‹ 返回</button><div><h1>⚡ 電量查詢</h1><p>V30 Hybrid｜站號 Server 配對｜逐站回填</p></div></header><main id="ub-v29-main"></main></div></section>`;
-     doc.body.appendChild(root);
-   }
-   const fab=root.querySelector('#ub-v29-fab');
-   const page=root.querySelector('#ub-v29-page');
-   const closeButton=root.querySelector('#ub-v29-close');
+   if(!root||!root.isConnected)root=createRoot();
+   let fab=root.querySelector('#ub-v29-fab');
+   let page=root.querySelector('#ub-v29-page');
+   let closeButton=root.querySelector('#ub-v29-close');
+   if(!fab||!page||!closeButton){try{root.remove();}catch(_){}root=createRoot();fab=root.querySelector('#ub-v29-fab');page=root.querySelector('#ub-v29-page');closeButton=root.querySelector('#ub-v29-close');}
    if(fab)fab.onclick=open;
    if(closeButton)closeButton.onclick=close;
-   if(fab&&page&&!page.classList.contains('open'))fab.style.display='';
+   if(root.style.display==='none')root.style.display='';
+   if(root.hidden)root.hidden=false;
+   if(fab&&page&&!page.classList.contains('open')){
+     if(fab.style.display==='none')fab.style.display='';
+     if(fab.style.visibility==='hidden')fab.style.visibility='visible';
+     if(fab.style.opacity==='0')fab.style.opacity='1';
+     if(fab.style.pointerEvents==='none')fab.style.pointerEvents='auto';
+     if(fab.hidden)fab.hidden=false;
+     fab.removeAttribute('aria-hidden');
+   }
    let style=doc.getElementById(ROOT+'-style');if(!style){style=doc.createElement('style');style.id=ROOT+'-style';doc.head.appendChild(style);}style.textContent=styleText();
    const subtitle=root.querySelector('header p');if(subtitle)subtitle.textContent='V30 Hybrid｜站號 Server 配對｜逐站回填';
    return root;
+ }
+ function repairFloatingButton(){
+   const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');
+   if(!fab||!page)return;
+   if(!page.classList.contains('open')){
+     if(fab.style.display==='none')fab.style.display='';
+     if(fab.style.visibility==='hidden')fab.style.visibility='visible';
+     if(fab.style.opacity==='0')fab.style.opacity='1';
+     if(fab.style.pointerEvents==='none')fab.style.pointerEvents='auto';
+     if(fab.hidden)fab.hidden=false;
+   }
+ }
+ function installUiWatchdog(){
+   runtime.uiRepair=repairFloatingButton;
+   if(!runtime.uiObserver){
+     let repairTimer=null;
+     runtime.uiObserver=new MutationObserver(()=>{
+       win.clearTimeout(repairTimer);
+       repairTimer=win.setTimeout(()=>{try{runtime.uiRepair?.();}catch(_){}},80);
+     });
+     runtime.uiObserver.observe(doc.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['style','class','hidden']});
+   }
+   if(!runtime.uiInterval){
+     runtime.uiInterval=win.setInterval(()=>{try{runtime.uiRepair?.();}catch(_){}},1500);
+   }
  }
  function open(){const root=ensure(),page=root.querySelector('#ub-v29-page');root.querySelector('#ub-v29-fab').style.display='none';page.classList.add('open');page.setAttribute('aria-hidden','false');root._htmlOverflow=doc.documentElement.style.overflow;root._bodyOverflow=doc.body.style.overflow;doc.documentElement.style.overflow='hidden';doc.body.style.overflow='hidden';render();}
  function close(){const root=ensure(),page=root.querySelector('#ub-v29-page');page.classList.remove('open');page.setAttribute('aria-hidden','true');root.querySelector('#ub-v29-fab').style.display='';doc.documentElement.style.overflow=root._htmlOverflow||'';doc.body.style.overflow=root._bodyOverflow||'';reverseStations.clear();}
@@ -284,7 +321,7 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
    if(runId!==runtime.run)return;
    running=false;status.textContent=`查詢完成：${done-failed} 站成功${failed?`｜${failed} 站未取得`:''}`;root.querySelector('#ub-updated').textContent=`最後更新：${new Date().toLocaleString('zh-TW',{hour12:false})}`;root.querySelectorAll('#ub-query,#ub-force').forEach(b=>b.disabled=false);summarize(done,specs.length,failed);
  }
- ensure();render();
+ ensure();render();installUiWatchdog();repairFloatingButton();
 })();
 </script></body></html>'''.replace('__ARGS__', payload)
     components.html(html_text, height=0, scrolling=False)
