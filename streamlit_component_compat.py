@@ -2,15 +2,15 @@ from __future__ import annotations
 
 """Compatibility helpers shared by the maintained entrypoint and legacy UI.
 
-This module provides three focused compatibility layers:
+This module provides focused compatibility layers for the old-UI runtime:
 1. safe Streamlit v1 component declaration for legacy ``exec()`` code;
 2. centralized system-version / generation metadata and changelog rendering;
-3. maintained interaction upgrades that can be applied without rewriting the
-   large legacy UI file on every release.
+3. maintained browser interaction upgrades without rewriting the large legacy UI;
+4. configuration-selection compatibility for multi-sheet / multi-zone workflows.
 """
 
 import inspect
-from typing import Any
+from typing import Any, Iterable
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -19,9 +19,9 @@ import streamlit.components.v1 as components
 # ---------------------------------------------------------------------------
 # System version / generation metadata
 # ---------------------------------------------------------------------------
-# V30 is the baseline. From now on, five completed functional adjustments make
-# one generation. Changes 1-4 remain on the current generation; the fifth
-# adjustment promotes the visible/system version by one generation.
+# V30 is the baseline. Five completed functional adjustments make one generation.
+# Bug fixes are intentionally NOT added to POST_V30_CHANGES and therefore do not
+# advance the generation counter.
 VERSION_BASE_GENERATION = 30
 VERSION_CHANGE_THRESHOLD = 5
 POST_V30_CHANGES: tuple[tuple[str, str], ...] = (
@@ -44,6 +44,10 @@ POST_V30_CHANGES: tuple[tuple[str, str], ...] = (
     (
         "2026-09-07",
         "按下右側懸浮更新時先記住目前頁面捲動位置；場站與 GPS 同步造成頁面重跑後自動回到原位置，不再跳回頁首。",
+    ),
+    (
+        "2026-09-07",
+        "配置類型改為可複選的選單：使用者直接選擇要載入的可見 Excel 配置頁；取消自動搭配／綁定其他區域，並移除重複的「調度區域」篩選，分析範圍直接跟配置選擇同步，行政區篩選保留。",
     ),
 )
 
@@ -350,12 +354,14 @@ def install_component_declare_compat() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Version / changelog UI compatibility
+# Version / changelog / configuration UI compatibility
 # ---------------------------------------------------------------------------
 _ORIGINAL_SET_PAGE_CONFIG = st.set_page_config
 _ORIGINAL_CAPTION = st.caption
 _ORIGINAL_MARKDOWN = st.markdown
 _ORIGINAL_POPOVER = getattr(st, "popover", None)
+_ORIGINAL_SELECTBOX = st.selectbox
+_ORIGINAL_MULTISELECT = st.multiselect
 
 
 def _set_caller_version_globals() -> None:
@@ -422,14 +428,189 @@ def _versioned_popover(label, *args, **kwargs):
     return st.expander(str(label), expanded=False)
 
 
+def _as_option_list(options: Iterable[Any]) -> list[Any]:
+    try:
+        return list(options)
+    except TypeError:
+        return []
+
+
+def _legacy_exec_globals() -> dict[str, Any] | None:
+    """Find the top-level legacy_ui exec frame that called a Streamlit wrapper."""
+    frame = inspect.currentframe()
+    try:
+        caller = frame.f_back if frame else None
+        for _ in range(10):
+            if caller is None:
+                break
+            namespace = caller.f_globals
+            if (
+                "visible_configuration_sheet_names" in namespace
+                and "build_long_distance_status_dataframe" in namespace
+                and "normalize_dispatch_zone" in namespace
+            ):
+                return namespace
+            caller = caller.f_back
+    finally:
+        del frame
+    return None
+
+
+def _selected_configuration_options_factory(
+    selected_sheets: tuple[str, ...],
+    selected_zones: tuple[str, ...],
+    normalize_dispatch_zone,
+):
+    """Return only explicitly selected sheets; never auto-bind other pages."""
+    selected_zone_set = set(selected_zones)
+
+    def build_selected_configuration_options(
+        options: list[tuple[str, str]],
+        _selected_sheet: str,
+        companion_overrides: dict[str, str] | None = None,
+    ) -> list[tuple[str, str]]:
+        del companion_overrides
+        output: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for wanted_sheet in selected_sheets:
+            for sheet_name, route in options:
+                if str(sheet_name) != wanted_sheet:
+                    continue
+                zone = normalize_dispatch_zone(route)
+                if zone not in selected_zone_set:
+                    continue
+                pair_key = (str(sheet_name), str(route))
+                if pair_key in seen:
+                    continue
+                seen.add(pair_key)
+                output.append((sheet_name, route))
+        return output
+
+    return build_selected_configuration_options
+
+
+def _configuration_multiselect(label, options, *args, **kwargs):
+    option_list = _as_option_list(options)
+    if not option_list:
+        return _ORIGINAL_SELECTBOX(label, option_list, *args, **kwargs)
+
+    legacy_key = str(kwargs.get("key") or "configuration_type")
+    multi_key = f"{legacy_key}::multi"
+    valid_text = [str(item) for item in option_list]
+
+    existing_multi = st.session_state.get(multi_key)
+    if isinstance(existing_multi, (list, tuple)):
+        default_selected = [str(item) for item in existing_multi if str(item) in valid_text]
+    else:
+        existing_single = str(st.session_state.get(legacy_key) or "")
+        default_selected = [existing_single] if existing_single in valid_text else [valid_text[0]]
+
+    help_text = kwargs.get("help")
+    selected = _ORIGINAL_MULTISELECT(
+        "配置類型",
+        valid_text,
+        default=default_selected,
+        key=multi_key,
+        help=(
+            "可同時選擇多張 Excel 顯示中的配置頁。你選哪幾張，系統就只分析那些頁所包含的調度區域；不再自動綁定其他配置。"
+            + (f"\n\n{help_text}" if help_text else "")
+        ),
+        placeholder="選擇要載入的配置",
+    )
+
+    if not selected:
+        selected = [default_selected[0] if default_selected else valid_text[0]]
+        st.caption("⚠ 配置類型至少需要保留一項；目前暫時沿用上一項選擇。")
+
+    selected = [str(item) for item in selected if str(item) in valid_text]
+    if not selected:
+        selected = [valid_text[0]]
+
+    namespace = _legacy_exec_globals()
+    selected_zones: list[str] = []
+    if namespace is not None:
+        legacy_options = namespace.get("options", [])
+        normalize = namespace.get("normalize_dispatch_zone")
+        original_zones = tuple(namespace.get("ALL_DISPATCH_ZONES", ()))
+        selected_set = set(selected)
+        if callable(normalize):
+            covered = {
+                normalize(route)
+                for sheet_name, route in legacy_options
+                if str(sheet_name) in selected_set
+            }
+            selected_zones = [zone for zone in original_zones if zone in covered]
+            for sheet_name, route in legacy_options:
+                if str(sheet_name) not in selected_set:
+                    continue
+                zone = normalize(route)
+                if zone and zone not in selected_zones:
+                    selected_zones.append(zone)
+
+            if selected_zones:
+                namespace["ALL_DISPATCH_ZONES"] = tuple(selected_zones)
+                namespace["build_configuration_options_for_sheet"] = (
+                    _selected_configuration_options_factory(
+                        tuple(selected),
+                        tuple(selected_zones),
+                        normalize,
+                    )
+                )
+
+                original_context_strip = namespace.get("render_context_strip")
+                if callable(original_context_strip):
+                    selected_route_label = (
+                        f"{'＋'.join(selected)}｜{'／'.join(selected_zones)}"
+                    )
+
+                    def render_selected_context_strip(*context_args, **context_kwargs):
+                        if context_args:
+                            context_args = (selected_route_label, *context_args[1:])
+                        else:
+                            context_kwargs["route"] = selected_route_label
+                        return original_context_strip(*context_args, **context_kwargs)
+
+                    namespace["render_context_strip"] = render_selected_context_strip
+
+    representative = selected[0]
+    st.session_state[legacy_key] = representative
+    scope_key = f"__v31_selected_configuration_sheets__::{legacy_key}"
+    st.session_state[scope_key] = tuple(selected)
+    if selected_zones:
+        st.session_state[f"{scope_key}::zones"] = tuple(selected_zones)
+    return representative
+
+
+def _versioned_selectbox(label, options, *args, **kwargs):
+    label_text = str(label or "").strip()
+
+    if label_text == "配置類型":
+        return _configuration_multiselect(label, options, *args, **kwargs)
+
+    if label_text.endswith("搭配配置"):
+        option_list = _as_option_list(options)
+        if not option_list:
+            return None
+        return option_list[0]
+
+    if label_text == "調度區域":
+        option_list = _as_option_list(options)
+        if "全部" in option_list:
+            return "全部"
+        return option_list[0] if option_list else None
+
+    return _ORIGINAL_SELECTBOX(label, options, *args, **kwargs)
+
+
 def install_version_ui_compat() -> None:
-    """Install current version, badge, changelog and sidebar-location wrappers."""
+    """Install current version, changelog and maintained UI wrappers."""
     global _VERSION_UI_INSTALLED
     if _VERSION_UI_INSTALLED:
         return
     st.set_page_config = _versioned_set_page_config
     st.caption = _versioned_caption
     st.markdown = _versioned_markdown
+    st.selectbox = _versioned_selectbox
     if callable(_ORIGINAL_POPOVER):
         st.popover = _versioned_popover
     _VERSION_UI_INSTALLED = True
