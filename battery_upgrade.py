@@ -129,11 +129,12 @@ def render_floating_server_battery(
  const ROOT='ubike-battery-v29-upgrade';
  const BATTERY_URL='https://apis.youbike.com.tw/api/front/bike/lists';
  const FRESH_MS=30000, STALE_MS=300000, CONCURRENCY=8, REQUEST_TIMEOUT_MS=8500;
- const PREF_VERSION=4;
+ const PREF_VERSION=5, LOCATION_WATCH_VERSION=2;
  const runtime=win.__ubikeV29FastBattery||(win.__ubikeV29FastBattery={cache:new Map(),run:0});
  if(!(runtime.cache instanceof Map))runtime.cache=new Map();
- if(!runtime.locationState)runtime.locationState={lat:null,lon:null,accuracy:null,updatedAt:0,error:'',watchId:null};
- let currentResults={};
+ if(!runtime.locationState)runtime.locationState={lat:null,lon:null,accuracy:null,updatedAt:0,error:'',watchId:null,watchVersion:0};
+ if(!runtime.currentResults||typeof runtime.currentResults!=='object'||Array.isArray(runtime.currentResults))runtime.currentResults={};
+ const currentResults=runtime.currentResults;
  let running=false;
  const reverseStations=new Set();
 
@@ -269,16 +270,28 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
    else if(l.error){el.className='location-status bad';el.textContent=`定位未取得：${l.error}｜目前改用需更換顆數排序`;}
    else{el.className='location-status';el.textContent='正在取得定位…';}
  }
+ function refreshViews(filter){
+   const root=ensure(),box=root.querySelector('#ub-results');
+   if(box){const openKeys=new Set([...box.querySelectorAll('details.station[open]')].map(x=>x.getAttribute('data-station-key')||''));box.innerHTML=resultRows(currentResults,root.querySelector('#ub-pe')?.checked!==false,filter??root.querySelector('#ub-v29-search')?.value??'');for(const item of box.querySelectorAll('details.station'))if(openKeys.has(item.getAttribute('data-station-key')||''))item.open=true;}
+   const district=root.querySelector('#ub-district-summary');if(district)district.innerHTML=districtSummaryHtml(currentResults);updateLocationUi();
+ }
+ runtime.refreshViews=refreshViews;
  function startLocationWatch(){
    try{
      const geo=win.navigator&&win.navigator.geolocation?win.navigator.geolocation:(typeof navigator!=='undefined'?navigator.geolocation:null);
      if(!geo){runtime.locationState.error='此瀏覽器不支援定位';updateLocationUi();return;}
-     if(runtime.locationState.watchId!==null&&runtime.locationState.watchId!==undefined){updateLocationUi();return;}
+     const existing=runtime.locationState.watchId;
+     if(existing!==null&&existing!==undefined){
+       if(runtime.locationState.watchVersion===LOCATION_WATCH_VERSION){updateLocationUi();return;}
+       try{geo.clearWatch(existing);}catch(_){}
+       runtime.locationState.watchId=null;
+     }
+     runtime.locationState.watchVersion=LOCATION_WATCH_VERSION;
      runtime.locationState.watchId=geo.watchPosition(position=>{
        const c=position?.coords||{},lat=validCoord(c.latitude,-90,90),lon=validCoord(c.longitude,-180,180);if(lat===null||lon===null)return;
-       runtime.locationState.lat=lat;runtime.locationState.lon=lon;runtime.locationState.accuracy=Math.max(0,num(c.accuracy,0));runtime.locationState.updatedAt=Date.now();runtime.locationState.error='';updateLocationUi();refreshViews();
+       runtime.locationState.lat=lat;runtime.locationState.lon=lon;runtime.locationState.accuracy=Math.max(0,num(c.accuracy,0));runtime.locationState.updatedAt=Date.now();runtime.locationState.error='';updateLocationUi();runtime.refreshViews?.();
      },err=>{
-       const messages={1:'定位權限未允許',2:'暫時無法取得位置',3:'定位逾時'};runtime.locationState.error=messages[num(err?.code)]||String(err?.message||'定位失敗');updateLocationUi();refreshViews();
+       const messages={1:'定位權限未允許',2:'暫時無法取得位置',3:'定位逾時'};runtime.locationState.error=messages[num(err?.code)]||String(err?.message||'定位失敗');updateLocationUi();runtime.refreshViews?.();
      },{enableHighAccuracy:true,maximumAge:15000,timeout:10000});
    }catch(e){runtime.locationState.error=String(e?.message||e||'定位啟動失敗');updateLocationUi();}
  }
@@ -286,11 +299,6 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
  function close(){const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');page.classList.remove('open');page.setAttribute('aria-hidden','true');fab.style.display='flex';doc.documentElement.style.overflow=root._htmlOverflow||'';doc.body.style.overflow=root._bodyOverflow||'';reverseStations.clear();}
  function prefs(){try{return JSON.parse(localStorage.getItem('ubike-v29-fast-battery-pref')||'{}')||{};}catch(_){return {};}}
  function savePrefs(v){try{localStorage.setItem('ubike-v29-fast-battery-pref',JSON.stringify(v));}catch(_){}}
- function refreshViews(filter){
-   const root=ensure(),box=root.querySelector('#ub-results');
-   if(box){const openKeys=new Set([...box.querySelectorAll('details.station[open]')].map(x=>x.getAttribute('data-station-key')||''));box.innerHTML=resultRows(currentResults,root.querySelector('#ub-pe')?.checked!==false,filter??root.querySelector('#ub-v29-search')?.value??'');for(const item of box.querySelectorAll('details.station'))if(openKeys.has(item.getAttribute('data-station-key')||''))item.open=true;}
-   const district=root.querySelector('#ub-district-summary');if(district)district.innerHTML=districtSummaryHtml(currentResults);updateLocationUi();
- }
  function bindResultControls(root){const box=root.querySelector('#ub-results');if(!box)return;box.onclick=e=>{const btn=e.target.closest?.('.reverse-toggle');if(!btn)return;e.preventDefault();e.stopPropagation();let key='';try{key=decodeURIComponent(btn.getAttribute('data-reverse-key')||'');}catch(_){}if(!key)return;if(reverseStations.has(key))reverseStations.delete(key);else reverseStations.add(key);refreshViews();};}
  function render(){
    const root=ensure(),main=root.querySelector('#ub-v29-main'),map=args.route_station_map||{},zones=Object.keys(map),p=prefs();
@@ -302,13 +310,14 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
  async function runQuery(force){
    if(running)return;const root=ensure(),map=args.route_station_map||{},selected=[...root.querySelectorAll('[data-zone]:checked')].map(x=>x.value),status=root.querySelector('#ub-status');if(!selected.length){status.textContent='請至少選擇一個範圍';return;}
    const th=Math.max(0,Math.min(100,num(root.querySelector('#ub-th').value,89))),pr=Math.max(0,Math.min(th,num(root.querySelector('#ub-pr').value,69))),pe=root.querySelector('#ub-pe').checked;savePrefs({zones:selected,threshold:th,priority_threshold:pr,priority_enabled:pe,pref_version:PREF_VERSION});
-   const specs=[],seen=new Set();for(const z of selected)for(const item of (map[z]||[])){if(!item?.name||seen.has(item.name))continue;seen.add(item.name);specs.push(item);}currentResults={};running=true;runtime.run+=1;const runId=runtime.run;let index=0,done=0,failed=0;root.querySelectorAll('#ub-query,#ub-force').forEach(b=>b.disabled=true);status.textContent=`正在查詢 ${specs.length} 個場站…`;summarize(0,specs.length,0);
+   const specs=[],seen=new Set();for(const z of selected)for(const item of (map[z]||[])){if(!item?.name||seen.has(item.name))continue;seen.add(item.name);specs.push(item);}for(const key of Object.keys(currentResults))delete currentResults[key];running=true;runtime.run+=1;const runId=runtime.run;let index=0,done=0,failed=0;root.querySelectorAll('#ub-query,#ub-force').forEach(b=>b.disabled=true);status.textContent=`正在查詢 ${specs.length} 個場站…`;summarize(0,specs.length,0);
    async function worker(){while(index<specs.length&&runId===runtime.run){const spec=specs[index++];try{currentResults[spec.name]=await queryOne(spec,th,pr,force);}catch(e){failed++;currentResults[spec.name]={requested_name:spec.name,requested_district:spec.district||spec.official_district||'',official_district:spec.official_district||'',latitude:validCoord(spec.latitude,-90,90),longitude:validCoord(spec.longitude,-180,180),error:String(e?.message||e),low_count:0,priority_count:0};}finally{done++;status.textContent=`查詢中：${done}/${specs.length}｜失敗 ${failed}`;summarize(done,specs.length,failed);}}}
    await Promise.all(Array.from({length:Math.min(CONCURRENCY,specs.length)},worker));if(runId!==runtime.run)return;running=false;status.textContent=`查詢完成：${done-failed} 站成功${failed?`｜${failed} 站未取得`:''}`;root.querySelector('#ub-updated').textContent=`最後更新：${new Date().toLocaleString('zh-TW',{hour12:false})}`;root.querySelectorAll('#ub-query,#ub-force').forEach(b=>b.disabled=false);summarize(done,specs.length,failed);
  }
  function repairFloatingButton(){try{const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');if(!page.classList.contains('open')){fab.style.display='flex';fab.style.visibility='visible';fab.style.opacity='1';fab.style.pointerEvents='auto';fab.hidden=false;}}catch(_){} }
- if(runtime.safeUiInterval){try{win.clearInterval(runtime.safeUiInterval);}catch(_){}}
+ if(runtime.safeUiInterval){try{win.clearInterval(runtime.safeUiInterval);}catch(_){} }
  runtime.safeUiInterval=win.setInterval(repairFloatingButton,1000);
+ runtime.refreshViews=refreshViews;
  ensure();render();repairFloatingButton();startLocationWatch();
 })();
 </script></body></html>'''.replace('__ARGS__', payload)
