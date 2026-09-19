@@ -218,7 +218,15 @@ def render_floating_battery_query(
     icon_html = r'''
         <script>
         (() => {
-          const doc = window.parent.document;
+          const win = window.parent;
+          const doc = win.document;
+          const repairBatteryFab = () => {
+            try { win.__ubikeV29FastBattery?.repairFloatingButton?.(); } catch (_) {}
+          };
+          repairBatteryFab();
+          win.setTimeout(repairBatteryFab, 60);
+          win.setTimeout(repairBatteryFab, 250);
+          win.setTimeout(repairBatteryFab, 900);
           ['ubike-battery-fab', 'ubike-battery-page', 'ubike-battery-style'].forEach(id => {
             try { doc.getElementById(id)?.remove(); } catch (_) {}
           });
@@ -407,6 +415,11 @@ replace_exact(
 _BUG_FIX_CONTENT_MD = """
 #### 🐞 BUG 修復紀錄
 > 僅記錄已實際完成的修復；單純新增功能不列入。
+
+**2026/09/19｜電池查詢懸浮按鈕在更新後消失**
+- 修復 Streamlit rerun 後電池查詢 FAB 可能被 DOM 重建移除的問題。
+- 電池 FAB 改由 parent window 永久守護，並加入 MutationObserver 與 750ms 自我修復。
+- 主頁每次重跑也會主動要求電池模組立即重建／顯示按鈕。
 
 **2026/09/19｜懸浮更新造成整頁重載、定位中斷**
 - 修復右側懸浮「更新」會重新載入整個瀏覽器頁面的問題。
