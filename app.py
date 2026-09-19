@@ -10,8 +10,8 @@ executing it, this entrypoint applies focused V29 compatibility fixes:
 3. Taitung fallback remains available only in the existing no-workbook path;
 4. live station sync uses the V29 Python Server service instead of requiring a
    hidden browser Streamlit component on mobile;
-5. the floating refresh button requests a fresh server sync by reloading with a
-   one-time refresh token when no browser component exists;
+5. the floating refresh button requests a fresh server sync through the existing
+   Streamlit geolocation bridge, without reloading the whole browser page;
 6. the floating battery query uses the V29 Fast Client battery engine and a
    mobile-safe one-way HTML UI, avoiding custom-component readiness failures;
 7. the V29 battery entry occupies the exact legacy battery-button slot so the
@@ -22,6 +22,7 @@ executing it, this entrypoint applies focused V29 compatibility fixes:
    refresh, improving iPhone/in-app-browser permission reliability.
 """
 
+import json
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -552,12 +553,68 @@ replace_exact(
 )
 
 replace_exact(
+    '  function runLocate({ automatic = false, forceDelivery = false } = {}) {',
+    '  function runLocate({ automatic = false, forceDelivery = false, requestLiveRefresh = false } = {}) {',
+    label="geolocation refresh bridge signature",
+)
+
+replace_exact(
+    '    navigator.geolocation.getCurrentPosition(\n',
+    '''    if (requestLiveRefresh) {
+      setValue({
+        event_id: eventId(),
+        manual_live_refresh: true,
+        refresh_only: true,
+      });
+    }
+
+    navigator.geolocation.getCurrentPosition(
+''',
+    label="geolocation refresh bridge event",
+)
+
+replace_exact(
     '  button.addEventListener("click", () => runLocate());',
     '''  button.addEventListener("click", () => {
     autoStarted = true;
     runLocate({ automatic: false, forceDelivery: true });
   });''',
     label="geolocation direct click",
+)
+
+replace_exact(
+    '''  window.addEventListener("message", event => {
+    if (!event.data || event.data.type !== "streamlit:render") return;
+    args = event.data.args || {};
+    document.body.classList.toggle("compact", Boolean(args.compact));''',
+    '''  window.addEventListener("message", event => {
+    if (!event.data) return;
+    if (event.data.type === "ubike:manual-locate-and-refresh") {
+      autoStarted = true;
+      runLocate({ automatic: false, forceDelivery: true, requestLiveRefresh: true });
+      return;
+    }
+    if (event.data.type !== "streamlit:render") return;
+    args = event.data.args || {};
+    document.body.classList.toggle("compact", Boolean(args.compact));''',
+    label="geolocation floating refresh listener",
+)
+
+replace_exact(
+    '''    except Exception as exc:
+        st.session_state[f"{prefix}::error"] = str(exc)
+
+    if isinstance(payload, dict):''',
+    '''    except Exception as exc:
+        st.session_state[f"{prefix}::error"] = str(exc)
+
+    if isinstance(payload, dict) and payload.get("manual_live_refresh"):
+        st.session_state["v29_server_live_force_refresh"] = True
+        if payload.get("refresh_only"):
+            payload = None
+
+    if isinstance(payload, dict):''',
+    label="geolocation refresh bridge state",
 )
 
 replace_exact(
@@ -619,28 +676,63 @@ replace_exact(
                 "error": "目前配置沒有可供同步的場站。",
             }
 
+        force_refresh = bool(
+            st.session_state.pop("v29_server_live_force_refresh", False)
+        )
+
+        # Backward compatibility for an old bookmarked live_refresh URL.
         refresh_token = ""
         try:
             refresh_token = str(st.query_params.get("live_refresh", "") or "").strip()
         except Exception:
             refresh_token = ""
         refresh_state_key = "v29_server_live_refresh_token"
-        force_refresh = bool(
+        if (
             refresh_token
             and st.session_state.get(refresh_state_key) != refresh_token
-        )
-        if force_refresh:
+        ):
             st.session_state[refresh_state_key] = refresh_token
+            force_refresh = True
+
+        def _emit_sync_state(state: str, *, station_count: int = 0, message: str = "") -> None:
+            try:
+                event_payload = json.dumps(
+                    {
+                        "source": "ubike-browser-sync",
+                        "type": "ubike:sync-state",
+                        "state": state,
+                        "station_count": max(0, int(station_count or 0)),
+                        "message": str(message or ""),
+                    },
+                    ensure_ascii=False,
+                )
+                components.html(
+                    f"<script>window.parent.postMessage({event_payload}, '*');</script>",
+                    height=0,
+                    scrolling=False,
+                )
+            except Exception:
+                pass
 
         try:
-            return get_live_status_for_stations(stations, force=force_refresh)
+            result = get_live_status_for_stations(stations, force=force_refresh)
+            if force_refresh:
+                _emit_sync_state(
+                    "success",
+                    station_count=int(result.get("station_count") or 0),
+                )
+            return result
         except LiveStatusServiceError as exc:
+            if force_refresh:
+                _emit_sync_state("error", message=str(exc))
             return {
                 "ok": False,
                 "event_id": uuid.uuid4().hex,
                 "error": str(exc),
             }
         except Exception as exc:
+            if force_refresh:
+                _emit_sync_state("error", message=str(exc))
             return {
                 "ok": False,
                 "event_id": uuid.uuid4().hex,
@@ -670,9 +762,45 @@ replace_exact(
     label="server live station scope",
 )
 
-# The legacy floating refresh button used to require discovery of a hidden
-# Streamlit iframe. With the V29 server adapter there is intentionally no iframe.
-# A refresh token causes one forced server fetch on the next Streamlit run.
+# The floating refresh button now also asks the visible geolocation component
+# for a fresh GPS fix. That component acts as a bidirectional Streamlit bridge:
+# it triggers a normal Streamlit rerun, marks one forced server fetch, and keeps
+# the browser page/session alive instead of using window.location reload.
+replace_exact(
+    '''            function requestManualSync() {{
+                let postedCount = 0;
+                for (const frame of doc.querySelectorAll("iframe")) {{''',
+    '''            function requestManualSync() {{
+                let locationPostedCount = 0;
+                for (const frame of doc.querySelectorAll("iframe")) {{
+                    try {{
+                        if (!frame.contentWindow) continue;
+                        const frameTitle = String(frame.getAttribute("title") || "").toLowerCase();
+                        const frameSource = String(frame.getAttribute("src") || "").toLowerCase();
+                        let isLocationFrame = frameTitle.includes("dispatch_geolocation")
+                            || frameSource.includes("dispatch_geolocation");
+                        try {{
+                            isLocationFrame = isLocationFrame
+                                || Boolean(frame.contentDocument?.getElementById("locateButton"));
+                        }} catch (_accessError) {{
+                            // 跨來源時改以 title／src 判斷。
+                        }}
+                        if (!isLocationFrame) continue;
+                        frame.contentWindow.postMessage(
+                            {{ type: "ubike:manual-locate-and-refresh" }},
+                            "*",
+                        );
+                        locationPostedCount += 1;
+                    }} catch (_error) {{
+                        // 略過無法存取的其他 iframe。
+                    }}
+                }}
+
+                let postedCount = 0;
+                for (const frame of doc.querySelectorAll("iframe")) {{''',
+    label="floating refresh location bridge",
+)
+
 replace_exact(
     '''                if (!postedCount) {{
                     showToast("同步元件尚未準備完成，請稍後再按一次");
@@ -680,15 +808,17 @@ replace_exact(
                 }}
                 setRefreshButtonState(true);''',
     '''                if (!postedCount) {{
-                    setRefreshButtonState(true);
-                    showToast("正在重新同步 YouBike 即時資料…");
-                    try {{
-                        const refreshUrl = new URL(win.location.href);
-                        refreshUrl.searchParams.set("live_refresh", String(Date.now()));
-                        win.location.href = refreshUrl.toString();
-                    }} catch (_refreshError) {{
-                        win.location.reload();
+                    if (!locationPostedCount) {{
+                        setRefreshButtonState(false);
+                        showToast("更新元件尚未準備完成，請稍後再按一次");
+                        return;
                     }}
+                    setRefreshButtonState(true);
+                    showToast("正在更新 YouBike 即時資料與定位…");
+                    win.clearTimeout(win.__ubikeManualSyncFallbackTimer);
+                    win.__ubikeManualSyncFallbackTimer = win.setTimeout(() => {{
+                        setRefreshButtonState(false);
+                    }}, 45000);
                     return;
                 }}
                 setRefreshButtonState(true);''',
