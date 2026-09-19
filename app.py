@@ -587,6 +587,7 @@ replace_exact(
           ok: false,
           event_id: eventId(),
           request_token: String(args.request_token || ""),
+          manual_live_refresh: Boolean(requestLiveRefresh),
           error: message,
         });
         setStatus(`定位失敗：${message}`, true);
@@ -627,18 +628,12 @@ replace_exact(
 )
 
 replace_exact(
-    '    navigator.geolocation.getCurrentPosition(\n',
-    '''    if (requestLiveRefresh) {
-      setValue({
-        event_id: eventId(),
-        manual_live_refresh: true,
-        refresh_only: true,
-      });
-    }
-
-    navigator.geolocation.getCurrentPosition(
-''',
-    label="geolocation refresh bridge event",
+    '''          request_token: String(args.request_token || ""),
+          latitude: Number(position.coords.latitude),''',
+    '''          request_token: String(args.request_token || ""),
+          manual_live_refresh: Boolean(requestLiveRefresh),
+          latitude: Number(position.coords.latitude),''',
+    label="geolocation refresh bridge success payload",
 )
 
 replace_exact(
@@ -678,8 +673,6 @@ replace_exact(
 
     if isinstance(payload, dict) and payload.get("manual_live_refresh"):
         st.session_state["v29_server_live_force_refresh"] = True
-        if payload.get("refresh_only"):
-            payload = None
 
     if isinstance(payload, dict):''',
     label="geolocation refresh bridge state",
