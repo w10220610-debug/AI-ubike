@@ -333,11 +333,18 @@ def _combined_refresh_component_html(body, *args, **kwargs):
                 " }",
                 1,
             )
-            body = body.replace(
-                "function open(){const root=ensure(),page=root.querySelector('#ub-v29-page');root.querySelector('#ub-v29-fab').style.display='none';",
-                "function open(){const root=ensure(),page=root.querySelector('#ub-v29-page');setBatteryModalFloatingHidden(true);root.querySelector('#ub-v29-fab').style.display='none';",
-                1,
-            )
+            if "function open(){const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');fab.style.display='none';" in body:
+                body = body.replace(
+                    "function open(){const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');fab.style.display='none';",
+                    "function open(){const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');setBatteryModalFloatingHidden(true);fab.style.display='none';",
+                    1,
+                )
+            else:
+                body = body.replace(
+                    "function open(){const root=ensure(),page=root.querySelector('#ub-v29-page');root.querySelector('#ub-v29-fab').style.display='none';",
+                    "function open(){const root=ensure(),page=root.querySelector('#ub-v29-page');setBatteryModalFloatingHidden(true);root.querySelector('#ub-v29-fab').style.display='none';",
+                    1,
+                )
             body = body.replace(
                 "doc.body.style.overflow=root._bodyOverflow||'';reverseStations.clear();}",
                 "doc.body.style.overflow=root._bodyOverflow||'';setBatteryModalFloatingHidden(false);reverseStations.clear();}",
