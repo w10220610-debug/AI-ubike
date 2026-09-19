@@ -397,6 +397,61 @@ else:
 )
 
 replace_exact(
+    '''else:
+    with st.expander("更新內容", expanded=False):
+        st.markdown(_UPDATE_CONTENT_MD)''',
+    '''else:
+    with st.expander("更新內容", expanded=False):
+        st.markdown(_UPDATE_CONTENT_MD)
+
+_BUG_FIX_CONTENT_MD = """
+#### 🐞 BUG 修復紀錄
+> 僅記錄已實際完成的修復；單純新增功能不列入。
+
+**2026/09/19｜懸浮更新造成整頁重載、定位中斷**
+- 修復右側懸浮「更新」會重新載入整個瀏覽器頁面的問題。
+- 移除 `window.location.reload()` 與 `live_refresh` 網址跳轉刷新。
+- 懸浮「更新」現在會同時刷新 YouBike 即時場站資料與 GPS 定位，但不重建整個頁面。
+
+**2026/09/10｜電池懸浮按鈕偶發消失**
+- 修復電池懸浮按鈕在手機／頁面重跑後偶發不見。
+- 按鈕、頁面或主容器缺失時會自動重建，並強化顯示層級。
+- 保留定位、距離排序與行政區需換電池統整。
+
+**2026/09/10｜電池頁定位與排序顯示修復**
+- 調整持續定位與依距離排序流程。
+- 修正行政區需換電池統整顯示，避免更新後排序／統計不同步。
+
+**2026/09/08｜V29 部署依賴失敗**
+- 修復 Streamlit 部署時 Debian `bullseye-security` Release file 過期造成安裝失敗。
+- 移除造成部署阻塞的 `packages.txt` apt 依賴設定，恢復 V29 部署。
+
+**2026/09/05｜跨縣市 Excel 場站範圍錯誤**
+- 修復電池查詢被硬限制只能使用 D1／D2／D3。
+- 改為依 Excel 實際區域讀取場站。
+- 上傳外縣市 Excel 時不再混入台東內建備援場站；只有未上傳 Excel 時才使用台東備援。
+
+**2026/09/05｜手機「同步元件尚未準備完成」**
+- 修復手機端依賴隱藏 iframe 同步元件造成無法更新即時車數。
+- 場站即時車數改由 V29 Python Server 同步服務處理，後續不再依賴隱藏同步 iframe。
+
+**2026/09/05｜手機電池查詢元件／重複入口**
+- 修復手機電池查詢 custom component readiness 問題。
+- 改用 V29 Server 電池引擎與 mobile-safe UI。
+- 新版電池入口直接取代舊按鈕位置，避免畫面出現兩個電池入口。
+
+**2026/08/30｜執行環境 PyArrow 穩定性**
+- 修復執行環境使用 `pyarrow 25.0.1` 的已知崩潰風險。
+- 改用 `pyarrow 24.0.0` 後 Streamlit 可正常啟動。
+"""
+
+with st.sidebar:
+    with st.expander("🐞 BUG修復內容", expanded=False):
+        st.markdown(_BUG_FIX_CONTENT_MD)''',
+    label="sidebar bug fix history",
+)
+
+replace_exact(
     '''    selected_shift = st.selectbox(
         "班別",
         list(SHIFT_COLUMNS.keys()),
