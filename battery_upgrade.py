@@ -314,10 +314,41 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
    async function worker(){while(index<specs.length&&runId===runtime.run){const spec=specs[index++];try{currentResults[spec.name]=await queryOne(spec,th,pr,force);}catch(e){failed++;currentResults[spec.name]={requested_name:spec.name,requested_district:spec.district||spec.official_district||'',official_district:spec.official_district||'',latitude:validCoord(spec.latitude,-90,90),longitude:validCoord(spec.longitude,-180,180),error:String(e?.message||e),low_count:0,priority_count:0};}finally{done++;status.textContent=`查詢中：${done}/${specs.length}｜失敗 ${failed}`;summarize(done,specs.length,failed);}}}
    await Promise.all(Array.from({length:Math.min(CONCURRENCY,specs.length)},worker));if(runId!==runtime.run)return;running=false;status.textContent=`查詢完成：${done-failed} 站成功${failed?`｜${failed} 站未取得`:''}`;root.querySelector('#ub-updated').textContent=`最後更新：${new Date().toLocaleString('zh-TW',{hour12:false})}`;root.querySelectorAll('#ub-query,#ub-force').forEach(b=>b.disabled=false);summarize(done,specs.length,failed);
  }
- function repairFloatingButton(){try{const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');if(!page.classList.contains('open')){fab.style.display='flex';fab.style.visibility='visible';fab.style.opacity='1';fab.style.pointerEvents='auto';fab.hidden=false;}}catch(_){} }
- if(runtime.safeUiInterval){try{win.clearInterval(runtime.safeUiInterval);}catch(_){} }
- runtime.safeUiInterval=win.setInterval(repairFloatingButton,1000);
+ function repairFloatingButton(){
+   try{
+     const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');
+     if(!page.classList.contains('open')){
+       fab.style.display='flex';
+       fab.style.visibility='visible';
+       fab.style.opacity='1';
+       fab.style.pointerEvents='auto';
+       fab.hidden=false;
+       fab.removeAttribute('aria-hidden');
+     }
+   }catch(_){}
+ }
+
+ // Parent-window watchdog: survives Streamlit component iframe replacement/reruns.
+ runtime.repairFloatingButton=repairFloatingButton;
  runtime.refreshViews=refreshViews;
+ if(!runtime.safeUiInterval){
+   runtime.safeUiInterval=win.setInterval(()=>{
+     try{runtime.repairFloatingButton?.();}catch(_){}
+   },750);
+ }
+ if(runtime.safeUiObserver){
+   try{runtime.safeUiObserver.disconnect();}catch(_){}
+ }
+ try{
+   let repairTimer=null;
+   runtime.safeUiObserver=new MutationObserver(()=>{
+     win.clearTimeout(repairTimer);
+     repairTimer=win.setTimeout(()=>{
+       try{runtime.repairFloatingButton?.();}catch(_){}
+     },40);
+   });
+   runtime.safeUiObserver.observe(doc.documentElement,{childList:true,subtree:true});
+ }catch(_){}
  ensure();render();repairFloatingButton();startLocationWatch();
 })();
 </script></body></html>'''.replace('__ARGS__', payload)
