@@ -587,7 +587,6 @@ replace_exact(
           ok: false,
           event_id: eventId(),
           request_token: String(args.request_token || ""),
-          manual_live_refresh: Boolean(requestLiveRefresh),
           error: message,
         });
         setStatus(`定位失敗：${message}`, true);
@@ -610,6 +609,7 @@ replace_exact(
           ok: false,
           event_id: eventId(),
           request_token: String(args.request_token || ""),
+          manual_live_refresh: Boolean(requestLiveRefresh),
           error: message,
         });
         setStatus(`定位失敗：${message}`, true);
