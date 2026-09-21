@@ -481,6 +481,30 @@ def apply_priority_station_order(
     return prepared
 
 
+def priority_mandatory_route_state(
+    candidates: list[dict],
+    status_cache: dict,
+    selected_shift: str = "",
+) -> dict:
+    """回報本班必完成任務是否已有可立即執行的場站。"""
+    pending_names = _priority_pending_names(status_cache, selected_shift)
+    pending_keys = {
+        _priority_station_key(name)
+        for name in pending_names
+    }
+    executable = [
+        candidate
+        for candidate in candidates
+        if _priority_station_key(candidate.get("station_name")) in pending_keys
+    ]
+    return {
+        "pending_count": len(pending_names),
+        "executable_count": len(executable),
+        "has_pending": bool(pending_names),
+        "has_executable": bool(executable),
+    }
+
+
 def _priority_general_preference_keys(
     active_base_token: str,
     selected_shift: str,
@@ -632,7 +656,7 @@ def render_priority_station_manager(
         with pref_col_1:
             priority_pin = bool(
                 toggle(
-                    "🚨 優先置頂",
+                    "🚨 必完成置頂",
                     value=True,
                     key=pin_key,
                     help="優先場站只顯示在上方待辦區，不在一般場站重複出現。",
@@ -641,7 +665,7 @@ def render_priority_station_manager(
         with pref_col_2:
             priority_only = bool(
                 toggle(
-                    "只看優先",
+                    "只看必完成",
                     value=False,
                     key=only_key,
                     help="只顯示本班尚未完成的人工派工場站。",
@@ -649,11 +673,11 @@ def render_priority_station_manager(
             )
 
     with st.expander(
-        f"🚨 優先場站｜{len(pending)} 未完成",
+        f"🚨 下班前必完成｜{len(pending)} 站未完成",
         expanded=False,
     ):
         if pending:
-            st.caption("紅＝缺車｜綠＝多車｜灰＝符合｜黃色＝資料未取得｜↑↓只調整待辦顯示，不影響智慧調度路線")
+            st.caption("本區＝下班前必完成｜紅＝缺車｜綠＝多車｜灰＝符合｜↑↓只調整待辦顯示，不影響智慧調度路線")
             for index, item in enumerate(list(pending)):
                 station_name = str(item.get("station_name") or "").strip()
                 station_key = _priority_station_key(station_name)
@@ -752,7 +776,7 @@ def render_priority_station_manager(
         priority_note = ""
         add_submitted = False
         if hasattr(st, "popover"):
-            with st.popover("＋ 新增優先場站", use_container_width=True):
+            with st.popover("＋ 新增必完成場站", use_container_width=True):
                 with st.form(
                     key=f"priority_add_form::{active_base_token}::{scope_id}::{page_mode}",
                     clear_on_submit=True,
@@ -767,7 +791,7 @@ def render_priority_station_manager(
                         placeholder="例如：下班前處理",
                     )
                     add_submitted = st.form_submit_button(
-                        "加入優先清單",
+                        "加入必完成清單",
                         type="primary",
                         use_container_width=True,
                     )
@@ -777,7 +801,7 @@ def render_priority_station_manager(
                 clear_on_submit=True,
             ):
                 selected_names = st.multiselect(
-                    "＋ 新增優先場站",
+                    "＋ 新增必完成場站",
                     available_names,
                     placeholder="搜尋並勾選場站",
                 )
@@ -786,7 +810,7 @@ def render_priority_station_manager(
                     placeholder="例如：下班前處理",
                 )
                 add_submitted = st.form_submit_button(
-                    "加入優先清單",
+                    "加入必完成清單",
                     type="primary",
                     use_container_width=True,
                 )
@@ -872,7 +896,7 @@ def render_priority_station_manager(
                     rerun_app()
 
     if pending:
-        st.caption(f"🚨 尚有 {len(pending)} 個優先場站待處理")
+        st.caption(f"🚨 本班尚有 {len(pending)} 個下班前必完成場站")
 
     return {
         "pending_names": _priority_pending_names(status_cache, selected_shift),
@@ -959,6 +983,7 @@ _UPDATE_CONTENT_MD = """
 - 新增「優先場站」派工待辦：智慧調度與一般分析共用清單，可多選新增、手動排序、完成／復原、收合；一般分析支援優先置頂與只看優先，智慧調度會讓可執行的優先站排在 AI 推薦之前。
 - 優先場站介面改為精簡模式：預設收合、單列操作、缺車紅色／多車綠色高對比標籤，新增場站移入彈出視窗。
 - 智慧調度不再依優先清單的人工順序排路線；優先清單只代表本班必處理任務，多個優先站之間由 AI 依車上載量、2.0／2.0E、缺多車與道路效率決定先後。
+- 「優先場站」正式定義為「本班下班前必完成」：有可執行的必完成站時只在其中用 AI 選最佳下一站；若暫時都不能處理，才允許先跑一般準備站調整車上 2.0／2.0E 或載量。
 """
 if hasattr(st, "popover"):
     with st.popover("更新內容"):
@@ -1593,6 +1618,10 @@ replace_exact(
         candidates,
         status_cache,
     )
+    priority_route_state = priority_mandatory_route_state(
+        candidates,
+        status_cache,
+    )
 
     manual_station_name = str(st.session_state.get(manual_station_key) or "").strip()''',
     label="smart dispatch priority candidate ordering",
@@ -1604,13 +1633,31 @@ replace_exact(
         str(recommended.get("station_name") or ""),
         status_cache,
     )
+    if priority_route_state.get("has_pending"):
+        pending_count = safe_nonnegative_int(priority_route_state.get("pending_count"))
+        executable_count = safe_nonnegative_int(priority_route_state.get("executable_count"))
+        if executable_count:
+            st.info(
+                f"🚨 本班尚有 {pending_count} 個下班前必完成場站；"
+                "目前有可執行任務，下一站會從必完成場站中依車上載量、缺多車與道路效率決定。"
+            )
+        else:
+            st.warning(
+                f"🚨 本班尚有 {pending_count} 個下班前必完成場站，但目前沒有可立即執行的必完成站。"
+                "智慧調度可先安排一般站調整車上 2.0／2.0E 或載量，之後再回到必完成任務。"
+            )
+
     recommendation_title = (
         "使用者指定下一站"
         if manual_station_name
         else (
-            "🚨 優先派工｜AI 計算下一站"
+            "🚨 下班前必完成｜AI 最佳下一站"
             if recommended_priority_rank is not None
-            else "下一站最高效益推薦"
+            else (
+                "🔄 準備調度｜為必完成任務調整車況"
+                if priority_route_state.get("has_pending")
+                else "下一站最高效益推薦"
+            )
         )
     )''',
     label="smart dispatch priority recommendation title",
@@ -1621,7 +1668,9 @@ replace_exact(
     '''            priority_rank = safe_nonnegative_int(candidate.get("_priority_rank"))
             ai_rank = safe_nonnegative_int(candidate.get("_ai_rank")) or rank
             if priority_rank:
-                rank_text = f"🚨 優先派工｜AI 第 {ai_rank} 名"
+                rank_text = f"🚨 下班前必完成｜AI 第 {ai_rank} 名"
+            elif priority_route_state.get("has_pending"):
+                rank_text = f"🔄 一般準備站｜AI 第 {ai_rank} 名"
             elif ai_rank == 1:
                 rank_text = "🤖 AI 首選"
             else:
