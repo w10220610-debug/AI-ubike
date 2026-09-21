@@ -1142,8 +1142,6 @@ def render_priority_station_panel(
                 changed = True
             if changed:
                 _save_priority_station_items(active_base_token, cache, items)
-                st.session_state[f"priority_add_select::{active_base_token}::{page_mode}"] = []
-                st.session_state[f"priority_add_note::{active_base_token}::{page_mode}"] = ""
                 rerun_app()
 
         if not pending:
