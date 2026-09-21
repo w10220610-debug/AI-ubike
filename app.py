@@ -966,8 +966,8 @@ replace_exact(
     layout="wide",
 )
 
-_UPDATE_CONTENT_MD = """
-#### V29 更新內容
+_UPDATE_CONTENT_MD = f"""
+#### {APP_VERSION} 更新內容
 
 **2026/09/22｜優先場站＋智慧調度整合**
 - 新增「優先場站」共用待辦：智慧調度與一般分析同步使用同一份清單，可多選新增、手動排序、完成、復原與收合；其用途仍是本班下班前要完成的場站。
@@ -978,7 +978,7 @@ _UPDATE_CONTENT_MD = """
 - 只要還有可立即執行的優先場站，就優先從優先任務中挑選下一站；若目前全部無法執行，才允許先安排一般準備站調整車上車種或載量，再回到優先場站任務。
 - 優先場站只有手動按「完成」才會移出待辦，並保留本班完成時間與復原功能。
 
-**既有 V29 更新**
+**既有更新紀錄**
 - 電池查詢範圍支援 Excel 任意區域，不再限制 D1／D2／D3。
 - 上傳外縣市 Excel 時，不會混入台東內建備援場站。
 - 未上傳配置表時，仍保留台東備援電量查詢。
@@ -991,27 +991,24 @@ _UPDATE_CONTENT_MD = """
 - AI 學習防污染：自然流量、人工調度、疑似人工調度分開標記；人工資料不進自然需求訓練。
 - iPhone 定位改為可見的直接定位按鈕；第一次由使用者點擊授權，成功後再進行背景更新。
 - 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。
-"""
-if hasattr(st, "popover"):
-    with st.popover("更新內容"):
-        st.markdown(_UPDATE_CONTENT_MD)
-else:
-    with st.expander("更新內容", expanded=False):
-        st.markdown(_UPDATE_CONTENT_MD)''',
-    label="update content popover",
+"""''',
+    label="update content data",
 )
 
 replace_exact(
-    '''else:
-    with st.expander("更新內容", expanded=False):
-        st.markdown(_UPDATE_CONTENT_MD)''',
-    '''else:
-    with st.expander("更新內容", expanded=False):
-        st.markdown(_UPDATE_CONTENT_MD)
+    '''- 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。
+"""''',
+    '''- 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。
+"""
 
 _BUG_FIX_CONTENT_MD = """
 #### 🐞 BUG 修復紀錄
 > 僅記錄已實際完成的修復；單純新增功能不列入。
+
+**2026/09/22｜更新內容入口重複／舊入口顯示過期內容**
+- 修復左側同時出現舊的頂部「更新內容」入口與新的 sidebar「更新內容」入口，造成操作重複且容易點到過期內容。
+- 已移除最上方舊入口，只保留左側「🆕 更新內容」；更新紀錄標題改為直接讀取目前系統版本，例如 V31 會顯示「V31 更新內容」。
+- 2026/09/22「優先場站＋智慧調度整合」仍固定放在更新內容最上方。
 
 **2026/09/22｜左側「更新內容」未顯示最新更新**
 - 修復更新內容雖已寫入 `_UPDATE_CONTENT_MD`，但左側 sidebar 只渲染 BUG 修復內容，造成使用者在左側看不到 2026/09/22 的優先場站更新。
