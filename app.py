@@ -319,6 +319,457 @@ def render_floating_battery_query(
     )
 
 
+PRIORITY_STATION_META_KEY = "__priority_stations_v1__"
+PRIORITY_COMPLETED_LIMIT = 80
+
+
+def _priority_station_key(value) -> str:
+    """建立優先場站比對鍵；保留原始顯示名稱，只用於安全比對。"""
+    text = str(value or "").strip().casefold().replace("臺", "台")
+    return "".join(text.split())
+
+
+def _priority_scope_id(selected_shift: str = "") -> str:
+    """優先清單以營運日＋班別分開，避免隔天仍把昨天已完成任務算進本班。"""
+    context = st.session_state.get("ai_shift_context", {})
+    if not isinstance(context, dict):
+        context = {}
+    operating_date = str(context.get("operating_date") or "").strip()
+    if not operating_date:
+        operating_date = datetime.now(AI_TIMEZONE).date().isoformat()
+    shift_label = str(
+        selected_shift
+        or context.get("source_shift")
+        or context.get("shift")
+        or "未設定班別"
+    ).strip()
+    return f"{operating_date}｜{shift_label}"
+
+
+def _priority_store(status_cache: dict) -> dict:
+    metadata = status_cache.setdefault("metadata", {})
+    store = metadata.get(PRIORITY_STATION_META_KEY)
+    if not isinstance(store, dict):
+        store = {}
+        metadata[PRIORITY_STATION_META_KEY] = store
+    return store
+
+
+def _priority_bucket(
+    status_cache: dict,
+    selected_shift: str = "",
+    *,
+    create: bool = True,
+) -> dict:
+    store = _priority_store(status_cache)
+    scope_id = _priority_scope_id(selected_shift)
+    bucket = store.get(scope_id)
+    if not isinstance(bucket, dict):
+        if not create:
+            return {"pending": [], "completed": []}
+        bucket = {"pending": [], "completed": [], "updated_at_epoch": time.time()}
+        store[scope_id] = bucket
+
+    pending_raw = bucket.get("pending", [])
+    completed_raw = bucket.get("completed", [])
+    if not isinstance(pending_raw, list):
+        pending_raw = []
+    if not isinstance(completed_raw, list):
+        completed_raw = []
+
+    pending: list[dict] = []
+    seen_pending: set[str] = set()
+    for raw in pending_raw:
+        item = {"station_name": raw} if isinstance(raw, str) else (dict(raw) if isinstance(raw, dict) else {})
+        station_name = str(item.get("station_name") or "").strip()
+        station_key = _priority_station_key(station_name)
+        if not station_name or not station_key or station_key in seen_pending:
+            continue
+        seen_pending.add(station_key)
+        item["station_name"] = station_name
+        item.setdefault("note", "")
+        item.setdefault("source", "manual")
+        pending.append(item)
+
+    completed: list[dict] = []
+    for raw in completed_raw:
+        item = {"station_name": raw} if isinstance(raw, str) else (dict(raw) if isinstance(raw, dict) else {})
+        station_name = str(item.get("station_name") or "").strip()
+        if not station_name:
+            continue
+        item["station_name"] = station_name
+        item.setdefault("note", "")
+        completed.append(item)
+
+    bucket["pending"] = pending
+    bucket["completed"] = completed[-PRIORITY_COMPLETED_LIMIT:]
+    return bucket
+
+
+def _save_priority_state(
+    *,
+    status_cache: dict,
+    active_base_token: str,
+    selected_shift: str = "",
+) -> None:
+    bucket = _priority_bucket(status_cache, selected_shift)
+    bucket["updated_at_epoch"] = time.time()
+    save_cached_status(active_base_token, None, status_cache)
+
+
+def _priority_pending_names(status_cache: dict, selected_shift: str = "") -> list[str]:
+    bucket = _priority_bucket(status_cache, selected_shift, create=False)
+    return [
+        str(item.get("station_name") or "").strip()
+        for item in bucket.get("pending", [])
+        if isinstance(item, dict) and str(item.get("station_name") or "").strip()
+    ]
+
+
+def priority_station_rank(
+    station_name: str,
+    status_cache: dict,
+    selected_shift: str = "",
+) -> int | None:
+    wanted = _priority_station_key(station_name)
+    if not wanted:
+        return None
+    for index, name in enumerate(_priority_pending_names(status_cache, selected_shift), start=1):
+        if _priority_station_key(name) == wanted:
+            return index
+    return None
+
+
+def apply_priority_station_order(
+    candidates: list[dict],
+    status_cache: dict,
+    selected_shift: str = "",
+) -> list[dict]:
+    """人工派工優先於 AI 排名；不可執行的優先站仍留在待辦面板，不硬塞進候選。"""
+    if not candidates:
+        return candidates
+    priority_names = _priority_pending_names(status_cache, selected_shift)
+    priority_rank_map = {
+        _priority_station_key(name): index
+        for index, name in enumerate(priority_names, start=1)
+    }
+    prepared: list[dict] = []
+    for ai_rank, candidate in enumerate(candidates, start=1):
+        item = dict(candidate)
+        priority_rank = priority_rank_map.get(
+            _priority_station_key(item.get("station_name"))
+        )
+        item["_ai_rank"] = ai_rank
+        item["_priority_rank"] = priority_rank or 0
+        prepared.append(item)
+    prepared.sort(
+        key=lambda item: (
+            0 if int(item.get("_priority_rank") or 0) > 0 else 1,
+            int(item.get("_priority_rank") or item.get("_ai_rank") or 999999),
+        )
+    )
+    return prepared
+
+
+def _priority_general_preference_keys(
+    active_base_token: str,
+    selected_shift: str,
+) -> tuple[str, str]:
+    scope_id = _priority_scope_id(selected_shift)
+    return (
+        f"priority_pin::{active_base_token}::{scope_id}",
+        f"priority_only::{active_base_token}::{scope_id}",
+    )
+
+
+def _priority_general_preferences(
+    active_base_token: str,
+    selected_shift: str,
+) -> tuple[bool, bool]:
+    pin_key, only_key = _priority_general_preference_keys(
+        active_base_token,
+        selected_shift,
+    )
+    return (
+        bool(st.session_state.get(pin_key, True)),
+        bool(st.session_state.get(only_key, False)),
+    )
+
+
+def _priority_status_lookup(status_df) -> dict[str, object]:
+    lookup: dict[str, object] = {}
+    if status_df is None or getattr(status_df, "empty", True):
+        return lookup
+    if "場站名稱" not in status_df.columns:
+        return lookup
+    for _, row in status_df.iterrows():
+        station_name = str(row.get("場站名稱") or "").strip()
+        station_key = _priority_station_key(station_name)
+        if station_name and station_key:
+            lookup[station_key] = row
+    return lookup
+
+
+def _priority_status_caption(row) -> str:
+    if row is None:
+        return "目前配置找不到此場站；仍保留人工派工待辦。"
+    bike_status = format_dispatch_status(
+        row.get("2.0 現況"),
+        row.get("2.0 標準"),
+    )
+    ebike_status = format_dispatch_status(
+        row.get("2.0E 現況"),
+        row.get("2.0E 標準"),
+    )
+    route_zone = str(row.get("路線區域") or "").strip()
+    district = str(row.get("行政區") or "").strip()
+    location_text = "｜".join(part for part in (route_zone, district) if part)
+    prefix = f"{location_text}｜" if location_text else ""
+    return f"{prefix}2.0：{bike_status}｜2.0E：{ebike_status}"
+
+
+def render_priority_station_manager(
+    status_df,
+    *,
+    status_cache: dict,
+    active_base_token: str,
+    selected_shift: str,
+    page_mode: str,
+) -> dict:
+    """智慧調度／一般分析共用的人工派工待辦。"""
+    bucket = _priority_bucket(status_cache, selected_shift)
+    pending = bucket["pending"]
+    completed = bucket["completed"]
+    scope_id = _priority_scope_id(selected_shift)
+    row_lookup = _priority_status_lookup(status_df)
+
+    station_names: list[str] = []
+    if status_df is not None and not getattr(status_df, "empty", True) and "場站名稱" in status_df.columns:
+        station_names = [
+            name
+            for name in dict.fromkeys(
+                str(value or "").strip()
+                for value in status_df["場站名稱"].tolist()
+            )
+            if name
+        ]
+
+    priority_pin = True
+    priority_only = False
+    if page_mode == "一般分析":
+        pin_key, only_key = _priority_general_preference_keys(
+            active_base_token,
+            selected_shift,
+        )
+        toggle = getattr(st, "toggle", st.checkbox)
+        pref_col_1, pref_col_2 = st.columns(2)
+        with pref_col_1:
+            priority_pin = bool(
+                toggle(
+                    "🚨 優先場站置頂",
+                    value=True,
+                    key=pin_key,
+                    help="開啟後，優先場站只顯示在上方待辦區，不會在一般場站清單重複出現。",
+                )
+            )
+        with pref_col_2:
+            priority_only = bool(
+                toggle(
+                    "只看優先場站",
+                    value=False,
+                    key=only_key,
+                    help="只顯示本班尚未完成的人工派工場站。",
+                )
+            )
+
+    with st.expander(
+        f"🚨 優先場站｜{len(pending)} 站未完成",
+        expanded=bool(pending),
+    ):
+        if pending:
+            st.caption("人工派工優先於智慧推薦；只有手動按「完成」才會從待辦移除。")
+            for index, item in enumerate(list(pending)):
+                station_name = str(item.get("station_name") or "").strip()
+                station_key = _priority_station_key(station_name)
+                row = row_lookup.get(station_key)
+                with st.container(border=True):
+                    st.markdown(f"**{index + 1}. 🚨 {station_name}　派工優先**")
+                    st.caption(_priority_status_caption(row))
+                    note = str(item.get("note") or "").strip()
+                    if note:
+                        st.caption(f"📝 {note}")
+
+                    action_col_1, action_col_2, action_col_3 = st.columns([1, 1, 2])
+                    with action_col_1:
+                        move_up = st.button(
+                            "↑ 上移",
+                            use_container_width=True,
+                            disabled=index == 0,
+                            key=f"priority_up::{active_base_token}::{scope_id}::{station_key}",
+                        )
+                    with action_col_2:
+                        move_down = st.button(
+                            "↓ 下移",
+                            use_container_width=True,
+                            disabled=index >= len(pending) - 1,
+                            key=f"priority_down::{active_base_token}::{scope_id}::{station_key}",
+                        )
+                    with action_col_3:
+                        mark_done = st.button(
+                            "✓ 完成",
+                            type="primary",
+                            use_container_width=True,
+                            key=f"priority_done::{active_base_token}::{scope_id}::{station_key}",
+                        )
+
+                    if move_up and index > 0:
+                        pending[index - 1], pending[index] = pending[index], pending[index - 1]
+                        _save_priority_state(
+                            status_cache=status_cache,
+                            active_base_token=active_base_token,
+                            selected_shift=selected_shift,
+                        )
+                        rerun_app()
+                    if move_down and index < len(pending) - 1:
+                        pending[index + 1], pending[index] = pending[index], pending[index + 1]
+                        _save_priority_state(
+                            status_cache=status_cache,
+                            active_base_token=active_base_token,
+                            selected_shift=selected_shift,
+                        )
+                        rerun_app()
+                    if mark_done:
+                        completed_item = dict(pending.pop(index))
+                        completed_item["completed_at_epoch"] = time.time()
+                        completed_item["completed_shift"] = selected_shift
+                        completed.append(completed_item)
+                        bucket["completed"] = completed[-PRIORITY_COMPLETED_LIMIT:]
+                        _save_priority_state(
+                            status_cache=status_cache,
+                            active_base_token=active_base_token,
+                            selected_shift=selected_shift,
+                        )
+                        rerun_app()
+        else:
+            st.caption("本班目前沒有未完成的優先場站。")
+
+        pending_keys = {
+            _priority_station_key(item.get("station_name"))
+            for item in pending
+            if isinstance(item, dict)
+        }
+        available_names = [
+            name
+            for name in station_names
+            if _priority_station_key(name) not in pending_keys
+        ]
+        with st.form(
+            key=f"priority_add_form::{active_base_token}::{scope_id}::{page_mode}",
+            clear_on_submit=True,
+        ):
+            selected_names = st.multiselect(
+                "＋ 新增優先場站",
+                available_names,
+                placeholder="搜尋並勾選一個或多個場站",
+            )
+            priority_note = st.text_input(
+                "派工備註（可留空）",
+                placeholder="例如：下班前處理、主管交代、補滿後回報",
+            )
+            add_submitted = st.form_submit_button(
+                "加入優先清單",
+                type="primary",
+                use_container_width=True,
+            )
+
+        if add_submitted:
+            selected_names = [
+                str(name).strip()
+                for name in selected_names
+                if str(name).strip()
+            ]
+            if not selected_names:
+                st.warning("請至少選擇一個場站。")
+            else:
+                created_at = time.time()
+                for station_name in selected_names:
+                    station_key = _priority_station_key(station_name)
+                    if any(
+                        _priority_station_key(item.get("station_name")) == station_key
+                        for item in pending
+                        if isinstance(item, dict)
+                    ):
+                        continue
+                    pending.append(
+                        {
+                            "station_name": station_name,
+                            "note": str(priority_note or "").strip(),
+                            "created_at_epoch": created_at,
+                            "created_shift": selected_shift,
+                            "source": "manual",
+                        }
+                    )
+                _save_priority_state(
+                    status_cache=status_cache,
+                    active_base_token=active_base_token,
+                    selected_shift=selected_shift,
+                )
+                rerun_app()
+
+    if completed:
+        with st.expander(f"✅ 本班已完成｜{len(completed)} 站", expanded=False):
+            for reverse_index, item in enumerate(reversed(completed[-10:]), start=1):
+                station_name = str(item.get("station_name") or "").strip()
+                completed_epoch = float(item.get("completed_at_epoch") or 0)
+                try:
+                    completed_time = datetime.fromtimestamp(
+                        completed_epoch,
+                        AI_TIMEZONE,
+                    ).strftime("%H:%M")
+                except (TypeError, ValueError, OSError):
+                    completed_time = "—"
+                row_col, restore_col = st.columns([4, 1])
+                with row_col:
+                    st.markdown(f"✓ **{station_name}**")
+                    st.caption(f"已完成 {completed_time}")
+                with restore_col:
+                    restore_clicked = st.button(
+                        "復原",
+                        use_container_width=True,
+                        key=(
+                            f"priority_restore::{active_base_token}::{scope_id}::"
+                            f"{reverse_index}::{_priority_station_key(station_name)}"
+                        ),
+                    )
+                if restore_clicked:
+                    restored = dict(item)
+                    restored.pop("completed_at_epoch", None)
+                    restored.pop("completed_shift", None)
+                    if not any(
+                        _priority_station_key(pending_item.get("station_name"))
+                        == _priority_station_key(station_name)
+                        for pending_item in pending
+                        if isinstance(pending_item, dict)
+                    ):
+                        pending.append(restored)
+                    completed.remove(item)
+                    _save_priority_state(
+                        status_cache=status_cache,
+                        active_base_token=active_base_token,
+                        selected_shift=selected_shift,
+                    )
+                    rerun_app()
+
+    if pending:
+        st.info(f"🚨 尚有 {len(pending)} 個優先場站待處理。")
+
+    return {
+        "pending_names": _priority_pending_names(status_cache, selected_shift),
+        "priority_pin": priority_pin,
+        "priority_only": priority_only,
+    }
+
+
 def replace_exact(old: str, new: str, *, label: str) -> None:
     global source
     count = source.count(old)
@@ -394,6 +845,7 @@ _UPDATE_CONTENT_MD = """
 - AI 學習防污染：自然流量、人工調度、疑似人工調度分開標記；人工資料不進自然需求訓練。
 - iPhone 定位改為可見的直接定位按鈕；第一次由使用者點擊授權，成功後再進行背景更新。
 - 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。
+- 新增「優先場站」派工待辦：智慧調度與一般分析共用清單，可多選新增、手動排序、完成／復原、收合；一般分析支援優先置頂與只看優先，智慧調度會讓可執行的優先站排在 AI 推薦之前。
 """
 if hasattr(st, "popover"):
     with st.popover("更新內容"):
@@ -896,6 +1348,172 @@ replace_exact(
                 }}
                 setRefreshButtonState(true);''',
     label="server live floating refresh",
+)
+
+
+# Shared priority-station task list: render once after live data/alerts are ready,
+# then let both work modes consume the same persisted state.
+replace_exact(
+    '''render_station_alert_summary(
+    base_df,
+    station_locations=combined_station_locations,
+    current_location=shared_location,
+    alerts=station_alerts,
+)
+
+if page_mode == "智慧調度":''',
+    '''render_station_alert_summary(
+    base_df,
+    station_locations=combined_station_locations,
+    current_location=shared_location,
+    alerts=station_alerts,
+)
+
+priority_station_ui = render_priority_station_manager(
+    base_df,
+    status_cache=status_cache,
+    active_base_token=active_base["token"],
+    selected_shift=selected_shift,
+    page_mode=page_mode,
+)
+
+if page_mode == "智慧調度":''',
+    label="shared priority station manager",
+)
+
+replace_exact(
+    '''    selected_shift: str,
+    active_base_token: str,
+) -> None:
+    """局部重跑排序、報表及懸浮工具，避免一般分析操作重新載入整個系統。"""''',
+    '''    selected_shift: str,
+    active_base_token: str,
+    all_status_df: pd.DataFrame,
+    status_cache: dict,
+) -> None:
+    """局部重跑排序、報表及懸浮工具，避免一般分析操作重新載入整個系統。"""''',
+    label="general analysis priority parameters",
+)
+
+replace_exact(
+    '''    result_df = analysis_result_df
+
+    with st.expander("排序設定", expanded=False):''',
+    '''    result_df = analysis_result_df
+
+    priority_pin, priority_only = _priority_general_preferences(
+        active_base_token,
+        selected_shift,
+    )
+    priority_pending_names = _priority_pending_names(
+        status_cache,
+        selected_shift,
+    )
+    priority_pending_keys = {
+        _priority_station_key(name)
+        for name in priority_pending_names
+    }
+
+    if priority_only:
+        st.info("🚨 目前僅顯示本班尚未完成的優先場站。")
+        priority_detail_df = build_analysis_result(all_status_df)
+        if priority_pending_keys:
+            priority_detail_df = priority_detail_df[
+                priority_detail_df["場站名稱"].astype(str).map(
+                    _priority_station_key
+                ).isin(priority_pending_keys)
+            ].reset_index(drop=True)
+        else:
+            priority_detail_df = priority_detail_df.iloc[0:0].copy()
+
+        if priority_detail_df.empty:
+            st.success("本班目前沒有未完成的優先場站。")
+        else:
+            render_dispatch_legend()
+            render_analysis_result_table(priority_detail_df)
+
+        st.caption("即時車數來源：YouBike 官網；優先場站必須手動按完成才會移除。")
+        render_floating_station_search(
+            priority_detail_df,
+            mobile_mode,
+            page_mode="一般分析",
+        )
+        render_floating_battery_query(
+            battery_route_map,
+            mobile_mode,
+        )
+        return
+
+    if priority_pin and priority_pending_keys and not result_df.empty:
+        result_df = result_df[
+            ~result_df["場站名稱"].astype(str).map(
+                _priority_station_key
+            ).isin(priority_pending_keys)
+        ].reset_index(drop=True)
+        st.markdown("### 一般場站")
+
+    with st.expander("排序設定", expanded=False):''',
+    label="general analysis priority filter",
+)
+
+replace_exact(
+    '''    selected_shift=selected_shift,
+    active_base_token=active_base["token"],
+)''',
+    '''    selected_shift=selected_shift,
+    active_base_token=active_base["token"],
+    all_status_df=base_df,
+    status_cache=status_cache,
+)''',
+    label="general analysis priority call args",
+)
+
+replace_exact(
+    '''            active_loop_phase=active_loop_phase,
+        )
+
+    manual_station_name = str(st.session_state.get(manual_station_key) or "").strip()''',
+    '''            active_loop_phase=active_loop_phase,
+        )
+
+    candidates = apply_priority_station_order(
+        candidates,
+        status_cache,
+    )
+
+    manual_station_name = str(st.session_state.get(manual_station_key) or "").strip()''',
+    label="smart dispatch priority candidate ordering",
+)
+
+replace_exact(
+    '''    recommendation_title = "使用者指定下一站" if manual_station_name else "下一站最高效益推薦"''',
+    '''    recommended_priority_rank = priority_station_rank(
+        str(recommended.get("station_name") or ""),
+        status_cache,
+    )
+    recommendation_title = (
+        "使用者指定下一站"
+        if manual_station_name
+        else (
+            f"🚨 派工優先下一站 #{recommended_priority_rank}"
+            if recommended_priority_rank is not None
+            else "下一站最高效益推薦"
+        )
+    )''',
+    label="smart dispatch priority recommendation title",
+)
+
+replace_exact(
+    '''            rank_text = "🤖 AI 首選" if rank == 1 else f"第 {rank} 名"''',
+    '''            priority_rank = safe_nonnegative_int(candidate.get("_priority_rank"))
+            ai_rank = safe_nonnegative_int(candidate.get("_ai_rank")) or rank
+            if priority_rank:
+                rank_text = f"🚨 派工優先 #{priority_rank}"
+            elif ai_rank == 1:
+                rank_text = "🤖 AI 首選"
+            else:
+                rank_text = f"AI 第 {ai_rank} 名"''',
+    label="smart dispatch priority candidate badge",
 )
 
 exec(compile(source, str(LEGACY_APP), "exec"), globals(), globals())
