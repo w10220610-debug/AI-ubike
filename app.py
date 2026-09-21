@@ -1013,6 +1013,10 @@ _BUG_FIX_CONTENT_MD = """
 #### 🐞 BUG 修復紀錄
 > 僅記錄已實際完成的修復；單純新增功能不列入。
 
+**2026/09/22｜左側「更新內容」未顯示最新更新**
+- 修復更新內容雖已寫入 `_UPDATE_CONTENT_MD`，但左側 sidebar 只渲染 BUG 修復內容，造成使用者在左側看不到 2026/09/22 的優先場站更新。
+- 左側現在固定同時顯示「🆕 更新內容」與「🐞 BUG修復內容」，兩者直接讀取各自的正式紀錄來源，避免內容已更新但選單看不到。
+
 **2026/09/20｜自動檢修：V29 啟動修補目標失效**
 - 自動逐一驗證 25 個 `replace_exact()` 修補，發現定位錯誤訊息修補的舊目標被誤改，可能導致重新部署／重啟時直接啟動失敗。
 - 已修正修補目標並重新驗證，目前 25/25 全部可依序套用。
@@ -1068,6 +1072,8 @@ _BUG_FIX_CONTENT_MD = """
 """
 
 with st.sidebar:
+    with st.expander("🆕 更新內容", expanded=False):
+        st.markdown(_UPDATE_CONTENT_MD)
     with st.expander("🐞 BUG修復內容", expanded=False):
         st.markdown(_BUG_FIX_CONTENT_MD)''',
     label="sidebar bug fix history",
