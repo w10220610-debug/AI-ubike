@@ -510,22 +510,74 @@ def _priority_status_lookup(status_df) -> dict[str, object]:
     return lookup
 
 
-def _priority_status_caption(row) -> str:
+def _priority_status_badge_html(row, label: str, current_column: str, standard_column: str) -> str:
+    """把缺／多狀態壓成高辨識度小標籤，保留資料未取得狀態。"""
     if row is None:
-        return "目前配置找不到此場站；仍保留人工派工待辦。"
-    bike_status = format_dispatch_status(
-        row.get("2.0 現況"),
-        row.get("2.0 標準"),
+        status_text = "資料未取得"
+    else:
+        status_text = format_dispatch_status(
+            row.get(current_column),
+            row.get(standard_column),
+        )
+
+    status_text = str(status_text or "資料未取得")
+    if "缺" in status_text or "少" in status_text:
+        background = "#fee2e2"
+        foreground = "#b91c1c"
+        border = "#fecaca"
+        icon = "▼"
+    elif "多" in status_text:
+        background = "#dcfce7"
+        foreground = "#166534"
+        border = "#bbf7d0"
+        icon = "▲"
+    elif "符合" in status_text:
+        background = "#eef2f7"
+        foreground = "#475569"
+        border = "#d7dee8"
+        icon = "●"
+    else:
+        background = "#fff7ed"
+        foreground = "#b45309"
+        border = "#fed7aa"
+        icon = "?"
+    return (
+        '<span style="display:inline-flex;align-items:center;gap:.24rem;'
+        'padding:.16rem .46rem;border-radius:999px;'
+        f'background:{background};color:{foreground};border:1px solid {border};'
+        'font-size:.74rem;font-weight:950;line-height:1.2;white-space:nowrap;">'
+        f'{icon} {html.escape(label)} {html.escape(status_text.replace(" 台", ""))}</span>'
     )
-    ebike_status = format_dispatch_status(
-        row.get("2.0E 現況"),
-        row.get("2.0E 標準"),
+
+
+def _priority_status_badges_html(row) -> str:
+    bike_badge = _priority_status_badge_html(
+        row,
+        "2.0",
+        "2.0 現況",
+        "2.0 標準",
     )
-    route_zone = str(row.get("路線區域") or "").strip()
-    district = str(row.get("行政區") or "").strip()
-    location_text = "｜".join(part for part in (route_zone, district) if part)
-    prefix = f"{location_text}｜" if location_text else ""
-    return f"{prefix}2.0：{bike_status}｜2.0E：{ebike_status}"
+    ebike_badge = _priority_status_badge_html(
+        row,
+        "2.0E",
+        "2.0E 現況",
+        "2.0E 標準",
+    )
+    location_text = ""
+    if row is not None:
+        route_zone = str(row.get("路線區域") or "").strip()
+        district = str(row.get("行政區") or "").strip()
+        location_text = "｜".join(part for part in (route_zone, district) if part)
+    location_html = (
+        f'<span style="font-size:.67rem;opacity:.58;white-space:nowrap;">'
+        f'{html.escape(location_text)}</span>'
+        if location_text else ""
+    )
+    return (
+        '<div style="display:flex;align-items:center;gap:.3rem;'
+        'flex-wrap:wrap;margin-top:.24rem;">'
+        f'{bike_badge}{ebike_badge}{location_html}</div>'
+    )
 
 
 def render_priority_station_manager(
@@ -536,7 +588,7 @@ def render_priority_station_manager(
     selected_shift: str,
     page_mode: str,
 ) -> dict:
-    """智慧調度／一般分析共用的人工派工待辦。"""
+    """智慧調度／一般分析共用的人工派工待辦（精簡介面）。"""
     bucket = _priority_bucket(status_cache, selected_shift)
     pending = bucket["pending"]
     completed = bucket["completed"]
@@ -544,7 +596,11 @@ def render_priority_station_manager(
     row_lookup = _priority_status_lookup(status_df)
 
     station_names: list[str] = []
-    if status_df is not None and not getattr(status_df, "empty", True) and "場站名稱" in status_df.columns:
+    if (
+        status_df is not None
+        and not getattr(status_df, "empty", True)
+        and "場站名稱" in status_df.columns
+    ):
         station_names = [
             name
             for name in dict.fromkeys(
@@ -566,16 +622,16 @@ def render_priority_station_manager(
         with pref_col_1:
             priority_pin = bool(
                 toggle(
-                    "🚨 優先場站置頂",
+                    "🚨 優先置頂",
                     value=True,
                     key=pin_key,
-                    help="開啟後，優先場站只顯示在上方待辦區，不會在一般場站清單重複出現。",
+                    help="優先場站只顯示在上方待辦區，不在一般場站重複出現。",
                 )
             )
         with pref_col_2:
             priority_only = bool(
                 toggle(
-                    "只看優先場站",
+                    "只看優先",
                     value=False,
                     key=only_key,
                     help="只顯示本班尚未完成的人工派工場站。",
@@ -583,73 +639,91 @@ def render_priority_station_manager(
             )
 
     with st.expander(
-        f"🚨 優先場站｜{len(pending)} 站未完成",
-        expanded=bool(pending),
+        f"🚨 優先場站｜{len(pending)} 未完成",
+        expanded=False,
     ):
         if pending:
-            st.caption("人工派工優先於智慧推薦；只有手動按「完成」才會從待辦移除。")
+            st.caption("紅＝缺車｜綠＝多車｜灰＝符合｜黃色＝資料未取得")
             for index, item in enumerate(list(pending)):
                 station_name = str(item.get("station_name") or "").strip()
                 station_key = _priority_station_key(station_name)
                 row = row_lookup.get(station_key)
-                with st.container(border=True):
-                    st.markdown(f"**{index + 1}. 🚨 {station_name}　派工優先**")
-                    st.caption(_priority_status_caption(row))
-                    note = str(item.get("note") or "").strip()
+                note = str(item.get("note") or "").strip()
+
+                info_col, up_col, down_col, done_col = st.columns(
+                    [6.4, .72, .72, 1.15],
+                    gap="small",
+                )
+                with info_col:
+                    st.markdown(
+                        (
+                            '<div style="padding:.38rem .52rem;'
+                            'border:1px solid rgba(148,163,184,.20);'
+                            'border-radius:10px;background:rgba(255,255,255,.72);'
+                            'margin:0 0 .12rem;">'
+                            f'<div style="font-size:.88rem;font-weight:950;'
+                            f'line-height:1.2;">{index + 1}. 🚨 {html.escape(station_name)}</div>'
+                            f'{_priority_status_badges_html(row)}'
+                            '</div>'
+                        ),
+                        unsafe_allow_html=True,
+                    )
                     if note:
                         st.caption(f"📝 {note}")
 
-                    action_col_1, action_col_2, action_col_3 = st.columns([1, 1, 2])
-                    with action_col_1:
-                        move_up = st.button(
-                            "↑ 上移",
-                            use_container_width=True,
-                            disabled=index == 0,
-                            key=f"priority_up::{active_base_token}::{scope_id}::{station_key}",
-                        )
-                    with action_col_2:
-                        move_down = st.button(
-                            "↓ 下移",
-                            use_container_width=True,
-                            disabled=index >= len(pending) - 1,
-                            key=f"priority_down::{active_base_token}::{scope_id}::{station_key}",
-                        )
-                    with action_col_3:
-                        mark_done = st.button(
-                            "✓ 完成",
-                            type="primary",
-                            use_container_width=True,
-                            key=f"priority_done::{active_base_token}::{scope_id}::{station_key}",
-                        )
+                with up_col:
+                    move_up = st.button(
+                        "↑",
+                        use_container_width=True,
+                        disabled=index == 0,
+                        key=f"priority_up::{active_base_token}::{scope_id}::{station_key}",
+                        help="提高優先順序",
+                    )
+                with down_col:
+                    move_down = st.button(
+                        "↓",
+                        use_container_width=True,
+                        disabled=index >= len(pending) - 1,
+                        key=f"priority_down::{active_base_token}::{scope_id}::{station_key}",
+                        help="降低優先順序",
+                    )
+                with done_col:
+                    mark_done = st.button(
+                        "✓",
+                        type="primary",
+                        use_container_width=True,
+                        key=f"priority_done::{active_base_token}::{scope_id}::{station_key}",
+                        help="完成此優先場站",
+                    )
 
-                    if move_up and index > 0:
-                        pending[index - 1], pending[index] = pending[index], pending[index - 1]
-                        _save_priority_state(
-                            status_cache=status_cache,
-                            active_base_token=active_base_token,
-                            selected_shift=selected_shift,
-                        )
-                        rerun_app()
-                    if move_down and index < len(pending) - 1:
-                        pending[index + 1], pending[index] = pending[index], pending[index + 1]
-                        _save_priority_state(
-                            status_cache=status_cache,
-                            active_base_token=active_base_token,
-                            selected_shift=selected_shift,
-                        )
-                        rerun_app()
-                    if mark_done:
-                        completed_item = dict(pending.pop(index))
-                        completed_item["completed_at_epoch"] = time.time()
-                        completed_item["completed_shift"] = selected_shift
-                        completed.append(completed_item)
-                        bucket["completed"] = completed[-PRIORITY_COMPLETED_LIMIT:]
-                        _save_priority_state(
-                            status_cache=status_cache,
-                            active_base_token=active_base_token,
-                            selected_shift=selected_shift,
-                        )
-                        rerun_app()
+                if move_up and index > 0:
+                    pending[index - 1], pending[index] = pending[index], pending[index - 1]
+                    _save_priority_state(
+                        status_cache=status_cache,
+                        active_base_token=active_base_token,
+                        selected_shift=selected_shift,
+                    )
+                    rerun_app()
+                if move_down and index < len(pending) - 1:
+                    pending[index + 1], pending[index] = pending[index], pending[index + 1]
+                    _save_priority_state(
+                        status_cache=status_cache,
+                        active_base_token=active_base_token,
+                        selected_shift=selected_shift,
+                    )
+                    rerun_app()
+                if mark_done:
+                    completed_item = dict(pending.pop(index))
+                    completed_item["completed_at_epoch"] = time.time()
+                    completed_item["completed_shift"] = selected_shift
+                    completed.append(completed_item)
+                    bucket["completed"] = completed[-PRIORITY_COMPLETED_LIMIT:]
+                    _save_priority_state(
+                        status_cache=status_cache,
+                        active_base_token=active_base_token,
+                        selected_shift=selected_shift,
+                    )
+                    rerun_app()
         else:
             st.caption("本班目前沒有未完成的優先場站。")
 
@@ -663,24 +737,49 @@ def render_priority_station_manager(
             for name in station_names
             if _priority_station_key(name) not in pending_keys
         ]
-        with st.form(
-            key=f"priority_add_form::{active_base_token}::{scope_id}::{page_mode}",
-            clear_on_submit=True,
-        ):
-            selected_names = st.multiselect(
-                "＋ 新增優先場站",
-                available_names,
-                placeholder="搜尋並勾選一個或多個場站",
-            )
-            priority_note = st.text_input(
-                "派工備註（可留空）",
-                placeholder="例如：下班前處理、主管交代、補滿後回報",
-            )
-            add_submitted = st.form_submit_button(
-                "加入優先清單",
-                type="primary",
-                use_container_width=True,
-            )
+
+        selected_names: list[str] = []
+        priority_note = ""
+        add_submitted = False
+        if hasattr(st, "popover"):
+            with st.popover("＋ 新增優先場站", use_container_width=True):
+                with st.form(
+                    key=f"priority_add_form::{active_base_token}::{scope_id}::{page_mode}",
+                    clear_on_submit=True,
+                ):
+                    selected_names = st.multiselect(
+                        "選擇場站",
+                        available_names,
+                        placeholder="搜尋並勾選場站",
+                    )
+                    priority_note = st.text_input(
+                        "備註（可留空）",
+                        placeholder="例如：下班前處理",
+                    )
+                    add_submitted = st.form_submit_button(
+                        "加入優先清單",
+                        type="primary",
+                        use_container_width=True,
+                    )
+        else:
+            with st.form(
+                key=f"priority_add_form::{active_base_token}::{scope_id}::{page_mode}",
+                clear_on_submit=True,
+            ):
+                selected_names = st.multiselect(
+                    "＋ 新增優先場站",
+                    available_names,
+                    placeholder="搜尋並勾選場站",
+                )
+                priority_note = st.text_input(
+                    "備註（可留空）",
+                    placeholder="例如：下班前處理",
+                )
+                add_submitted = st.form_submit_button(
+                    "加入優先清單",
+                    type="primary",
+                    use_container_width=True,
+                )
 
         if add_submitted:
             selected_names = [
@@ -717,7 +816,7 @@ def render_priority_station_manager(
                 rerun_app()
 
     if completed:
-        with st.expander(f"✅ 本班已完成｜{len(completed)} 站", expanded=False):
+        with st.expander(f"✅ 本班已完成｜{len(completed)}", expanded=False):
             for reverse_index, item in enumerate(reversed(completed[-10:]), start=1):
                 station_name = str(item.get("station_name") or "").strip()
                 completed_epoch = float(item.get("completed_at_epoch") or 0)
@@ -728,19 +827,21 @@ def render_priority_station_manager(
                     ).strftime("%H:%M")
                 except (TypeError, ValueError, OSError):
                     completed_time = "—"
-                row_col, restore_col = st.columns([4, 1])
+
+                row_col, restore_col = st.columns([5, 1], gap="small")
                 with row_col:
-                    st.markdown(f"✓ **{station_name}**")
-                    st.caption(f"已完成 {completed_time}")
+                    st.markdown(f"✓ **{station_name}**　（{completed_time}）")
                 with restore_col:
                     restore_clicked = st.button(
-                        "復原",
+                        "↩",
                         use_container_width=True,
                         key=(
                             f"priority_restore::{active_base_token}::{scope_id}::"
                             f"{reverse_index}::{_priority_station_key(station_name)}"
                         ),
+                        help="復原到未完成",
                     )
+
                 if restore_clicked:
                     restored = dict(item)
                     restored.pop("completed_at_epoch", None)
@@ -761,7 +862,7 @@ def render_priority_station_manager(
                     rerun_app()
 
     if pending:
-        st.info(f"🚨 尚有 {len(pending)} 個優先場站待處理。")
+        st.caption(f"🚨 尚有 {len(pending)} 個優先場站待處理")
 
     return {
         "pending_names": _priority_pending_names(status_cache, selected_shift),
@@ -846,6 +947,7 @@ _UPDATE_CONTENT_MD = """
 - iPhone 定位改為可見的直接定位按鈕；第一次由使用者點擊授權，成功後再進行背景更新。
 - 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。
 - 新增「優先場站」派工待辦：智慧調度與一般分析共用清單，可多選新增、手動排序、完成／復原、收合；一般分析支援優先置頂與只看優先，智慧調度會讓可執行的優先站排在 AI 推薦之前。
+- 優先場站介面改為精簡模式：預設收合、單列操作、缺車紅色／多車綠色高對比標籤，新增場站移入彈出視窗。
 """
 if hasattr(st, "popover"):
     with st.popover("更新內容"):
