@@ -445,27 +445,37 @@ def apply_priority_station_order(
     status_cache: dict,
     selected_shift: str = "",
 ) -> list[dict]:
-    """人工派工優先於 AI 排名；不可執行的優先站仍留在待辦面板，不硬塞進候選。"""
+    """優先清單只標記必處理站，不採用人工清單順序決定路線。
+
+    智慧調度仍以原本 AI 候選排序為基礎：車上 2.0／2.0E、剩餘載量、
+    場站缺多、道路時間與路線預看都先算完；可執行的優先站會集中在
+    一般站之前，但多個優先站彼此之間完全沿用 AI 算出的效率順序。
+    """
     if not candidates:
         return candidates
-    priority_names = _priority_pending_names(status_cache, selected_shift)
-    priority_rank_map = {
-        _priority_station_key(name): index
-        for index, name in enumerate(priority_names, start=1)
+
+    priority_keys = {
+        _priority_station_key(name)
+        for name in _priority_pending_names(status_cache, selected_shift)
     }
     prepared: list[dict] = []
     for ai_rank, candidate in enumerate(candidates, start=1):
         item = dict(candidate)
-        priority_rank = priority_rank_map.get(
+        is_priority = (
             _priority_station_key(item.get("station_name"))
+            in priority_keys
         )
         item["_ai_rank"] = ai_rank
-        item["_priority_rank"] = priority_rank or 0
+        item["_is_priority_task"] = bool(is_priority)
+        # 保留欄位給既有 UI 相容，但不再使用人工清單名次排序。
+        item["_priority_rank"] = 1 if is_priority else 0
         prepared.append(item)
+
+    # 關鍵：優先站之間只依 AI 原始排名，不依使用者在待辦清單的上下順序。
     prepared.sort(
         key=lambda item: (
-            0 if int(item.get("_priority_rank") or 0) > 0 else 1,
-            int(item.get("_priority_rank") or item.get("_ai_rank") or 999999),
+            0 if bool(item.get("_is_priority_task")) else 1,
+            int(item.get("_ai_rank") or 999999),
         )
     )
     return prepared
@@ -643,7 +653,7 @@ def render_priority_station_manager(
         expanded=False,
     ):
         if pending:
-            st.caption("紅＝缺車｜綠＝多車｜灰＝符合｜黃色＝資料未取得")
+            st.caption("紅＝缺車｜綠＝多車｜灰＝符合｜黃色＝資料未取得｜↑↓只調整待辦顯示，不影響智慧調度路線")
             for index, item in enumerate(list(pending)):
                 station_name = str(item.get("station_name") or "").strip()
                 station_key = _priority_station_key(station_name)
@@ -948,6 +958,7 @@ _UPDATE_CONTENT_MD = """
 - 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。
 - 新增「優先場站」派工待辦：智慧調度與一般分析共用清單，可多選新增、手動排序、完成／復原、收合；一般分析支援優先置頂與只看優先，智慧調度會讓可執行的優先站排在 AI 推薦之前。
 - 優先場站介面改為精簡模式：預設收合、單列操作、缺車紅色／多車綠色高對比標籤，新增場站移入彈出視窗。
+- 智慧調度不再依優先清單的人工順序排路線；優先清單只代表本班必處理任務，多個優先站之間由 AI 依車上載量、2.0／2.0E、缺多車與道路效率決定先後。
 """
 if hasattr(st, "popover"):
     with st.popover("更新內容"):
@@ -1597,7 +1608,7 @@ replace_exact(
         "使用者指定下一站"
         if manual_station_name
         else (
-            f"🚨 派工優先下一站 #{recommended_priority_rank}"
+            "🚨 優先派工｜AI 計算下一站"
             if recommended_priority_rank is not None
             else "下一站最高效益推薦"
         )
@@ -1610,7 +1621,7 @@ replace_exact(
     '''            priority_rank = safe_nonnegative_int(candidate.get("_priority_rank"))
             ai_rank = safe_nonnegative_int(candidate.get("_ai_rank")) or rank
             if priority_rank:
-                rank_text = f"🚨 派工優先 #{priority_rank}"
+                rank_text = f"🚨 優先派工｜AI 第 {ai_rank} 名"
             elif ai_rank == 1:
                 rank_text = "🤖 AI 首選"
             else:
