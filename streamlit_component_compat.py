@@ -53,13 +53,17 @@ POST_V30_CHANGES: tuple[tuple[str, str], ...] = (
         "2026-09-07",
         "配置類型新增「細分區域」選單：當同一張配置頁同時包含 D2、D3 等多個區域時，可再獨立勾選實際要分析的區域；一般分析、智慧調度與電池查詢都跟著細分範圍同步。",
     ),
+    (
+        "2026-09-22",
+        "效能優化：重用電池場站配對、快取程式編譯結果、減少無關畫面變動觸發柱號排序；不變更調度規則、更新頻率或使用者資料格式。",
+    ),
 )
 
 _COMPLETED_GENERATIONS_AFTER_V30 = len(POST_V30_CHANGES) // VERSION_CHANGE_THRESHOLD
 VERSION_PENDING_CHANGE_COUNT = len(POST_V30_CHANGES) % VERSION_CHANGE_THRESHOLD
 SYSTEM_GENERATION = VERSION_BASE_GENERATION + _COMPLETED_GENERATIONS_AFTER_V30
 SYSTEM_VERSION = f"V{SYSTEM_GENERATION}"
-SYSTEM_BUILD_DATE = "2026-09-07"
+SYSTEM_BUILD_DATE = "2026-09-22"
 SYSTEM_VERSION_LABEL = f"{SYSTEM_VERSION}｜第{SYSTEM_GENERATION}代"
 NEXT_SYSTEM_VERSION = f"V{SYSTEM_GENERATION + 1}"
 

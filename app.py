@@ -36,6 +36,7 @@ from ai_learning_guard import (
 )
 from battery_icon_data import BATTERY_ICON_DATA_URI
 from battery_upgrade import render_floating_server_battery as _render_floating_server_battery
+from performance_cache import compile_legacy_source
 
 
 LEGACY_APP = Path(__file__).with_name("legacy_ui.py")
@@ -300,14 +301,34 @@ def render_floating_battery_query(
           window.setTimeout(sortBatteryRowsByPillar, 500);
 
           const batteryRoot = doc.body;
-          if (batteryRoot && !window.parent.__ubikePillarSortObserver) {
+          // Keep mount/replacement detection, but ignore unrelated page changes.
+          if (win.__ubikePillarSortObserver && win.__ubikePillarSortVersion !== 2) {
+            win.__ubikePillarSortObserver.disconnect();
+            win.__ubikePillarSortObserver = null;
+          }
+          if (batteryRoot && !win.__ubikePillarSortObserver) {
             let sortTimer = null;
-            const observer = new MutationObserver(() => {
-              window.clearTimeout(sortTimer);
-              sortTimer = window.setTimeout(sortBatteryRowsByPillar, 30);
+            const touchesBatteryList = (node) => {
+              const element = node?.nodeType === 1 ? node : node?.parentElement;
+              if (!element) return false;
+              return Boolean(
+                element.closest?.('#ubike-battery-v29-upgrade .bike-list') ||
+                element.matches?.('#ubike-battery-v29-upgrade') ||
+                element.querySelector?.('#ubike-battery-v29-upgrade, #ubike-battery-v29-upgrade .bike-list')
+              );
+            };
+            const observer = new MutationObserver((records) => {
+              const relevant = records.some(record =>
+                record.target?.closest?.('#ubike-battery-v29-upgrade .bike-list') ||
+                Array.from(record.addedNodes || []).some(touchesBatteryList)
+              );
+              if (!relevant) return;
+              win.clearTimeout(sortTimer);
+              sortTimer = win.setTimeout(sortBatteryRowsByPillar, 30);
             });
             observer.observe(batteryRoot, { childList: true, subtree: true });
-            window.parent.__ubikePillarSortObserver = observer;
+            win.__ubikePillarSortObserver = observer;
+            win.__ubikePillarSortVersion = 2;
           }
         })();
         </script>
@@ -968,6 +989,12 @@ replace_exact(
 
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
+
+**2026/09/22｜效能優化（保留現有功能）**
+- 電池場站配對結果加入有容量上限的快取；配置或官方清單改變時重新配對，不延長電量快取時間。
+- 修補後的程式碼加入編譯快取；原始碼變更立即重新編譯，各使用者操作狀態仍獨立。
+- 電池柱號排序只在相關清單變動時排程檢查，保留懸浮按鈕防消失機制。
+- 不變更 Excel 配置、道路計算、優先場站規則、載量限制、定位或資料更新頻率。本次作為一項效能調整計入升版進度。
 
 **2026/09/22｜優先場站＋智慧調度整合**
 - 新增「優先場站」共用待辦：智慧調度與一般分析同步使用同一份清單，可多選新增、手動排序、完成、復原與收合；其用途仍是本班下班前要完成的場站。
@@ -1688,4 +1715,4 @@ replace_exact(
     label="smart dispatch priority candidate badge",
 )
 
-exec(compile(source, str(LEGACY_APP), "exec"), globals(), globals())
+exec(compile_legacy_source(source, str(LEGACY_APP)), globals(), globals())

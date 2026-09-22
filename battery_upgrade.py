@@ -7,9 +7,12 @@ import streamlit.components.v1 as components
 import ai_learning_guard as _ai_learning_guard_module
 from persistent_learning_pool import install_persistent_learning_pool
 from station_service import StationServiceError, get_station_catalog, match_station
+from performance_cache import CatalogMapCache
 
 
 install_persistent_learning_pool(_ai_learning_guard_module)
+
+_resolved_station_maps = CatalogMapCache(max_entries=16)
 
 
 def _clean_route_map(route_station_map: dict[str, list[dict]]) -> dict[str, list[dict]]:
@@ -62,6 +65,10 @@ def _resolve_station_numbers(
         }
         return failed, str(exc)
 
+    return _resolved_station_maps.resolve(clean_map, catalog, _build_resolved_station_map), ""
+
+
+def _build_resolved_station_map(clean_map, catalog) -> dict[str, list[dict]]:
     resolved: dict[str, list[dict]] = {}
     for zone, items in clean_map.items():
         zone_items: list[dict] = []
@@ -99,7 +106,7 @@ def _resolve_station_numbers(
             )
         if zone_items:
             resolved[zone] = zone_items
-    return resolved, ""
+    return resolved
 
 
 def render_floating_server_battery(
