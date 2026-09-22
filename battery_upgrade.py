@@ -336,9 +336,23 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
  }
 
  // Expose stable controls to the unified right-side floating toolbar.
- // This avoids depending on whether the hidden fallback FAB has mounted yet.
+ // Also consume queued open requests when this component mounts after the toolbar.
  runtime.openBatteryQuery=open;
  runtime.closeBatteryQuery=close;
+ runtime.engineReady=true;
+ if(runtime.openRequestHandler){
+   try{doc.removeEventListener('ubike:open-battery',runtime.openRequestHandler);}catch(_){}
+ }
+ runtime.openRequestHandler=()=>{
+   win.__ubikeBatteryOpenPending=false;
+   try{open();}catch(_){}
+ };
+ try{doc.addEventListener('ubike:open-battery',runtime.openRequestHandler);}catch(_){}
+ if(win.__ubikeBatteryOpenPending){
+   win.setTimeout(()=>{
+     try{runtime.openRequestHandler?.();}catch(_){}
+   },0);
+ }
 
  // Parent-window watchdog: survives Streamlit component iframe replacement/reruns.
  runtime.repairFloatingButton=repairFloatingButton;
