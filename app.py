@@ -1053,7 +1053,8 @@ _BUG_FIX_CONTENT_MD = """
 - 將電池查詢入口併入既有 `#ubike-float-tools .uft-actions`，與 TOP、智慧調度、搜尋、更新共用同一條右側直列、間距與層級。
 - V29 電池引擎原本的獨立 FAB 改為隱藏式內部／備援觸發器；共用直列存在時不再另外佔一個 fixed 位置，避免互相覆蓋。
 - Streamlit rerun 後若偵測到舊版懸浮列缺少電池入口，會強制重建共用直列；電池引擎仍保留自我修復，不影響既有查詢功能。
-- 修復共用直列比電池引擎更早載入時，第一次點擊顯示「電池查詢元件尚未準備完成」；現在會等待最多約 3 秒並在引擎就緒後自動開啟，不需要使用者再按第二次。
+- 修復共用直列比電池引擎更早載入時，第一次點擊無法開啟：現在點擊需求會先寫入 parent window 佇列，電池引擎一完成初始化就自行開啟，不再靠固定 3 秒輪詢。
+- 懸浮工具新增 stack version；部署新版後會強制淘汰瀏覽器裡殘留的舊懸浮列與舊 click handler，避免 Streamlit rerun 沿用過期按鈕事件。
 
 **2026/09/22｜更新內容入口重複／舊入口顯示過期內容**
 - 修復左側同時出現舊的頂部「更新內容」入口與新的 sidebar「更新內容」入口，造成操作重複且容易點到過期內容。
@@ -1492,7 +1493,7 @@ replace_exact(
     '''            if (win.__ubikeFloatingFingerprint === fingerprint && doc.getElementById("ubike-float-tools")) {{''',
     '''            if (
                 win.__ubikeFloatingFingerprint === fingerprint
-                && doc.getElementById("ubike-float-tools")
+                && doc.getElementById("ubike-float-tools")?.dataset?.stackVersion === "3"
                 && doc.querySelector("#ubike-float-tools .uft-battery")
             ) {{''',
     label="floating unified stack rebuild guard",
@@ -1544,6 +1545,17 @@ replace_exact(
 )
 
 replace_exact(
+    '''            const root = doc.createElement("div");
+            root.id = "ubike-float-tools";
+            root.innerHTML = `''',
+    '''            const root = doc.createElement("div");
+            root.id = "ubike-float-tools";
+            root.dataset.stackVersion = "3";
+            root.innerHTML = `''',
+    label="floating unified stack version",
+)
+
+replace_exact(
     '''            const topButton = root.querySelector(".uft-top");
             const analysisButton = root.querySelector(".uft-analysis");''',
     '''            const batteryButton = root.querySelector(".uft-battery");
@@ -1555,29 +1567,23 @@ replace_exact(
 replace_exact(
     '''            function isMobileLayout() {{''',
     '''            function openBatteryQuery() {{
-                const tryOpenBattery = (attempt = 0) => {{
-                    try {{
-                        const batteryRuntime = win.__ubikeV29FastBattery;
-                        batteryRuntime?.repairFloatingButton?.();
-                        if (typeof batteryRuntime?.openBatteryQuery === "function") {{
-                            batteryRuntime.openBatteryQuery();
-                            return;
-                        }}
-                        const batteryFab = doc.getElementById("ub-v29-fab");
-                        if (batteryFab) {{
-                            batteryFab.click();
-                            return;
-                        }}
-                    }} catch (_) {{}}
-
-                    if (attempt < 30) {{
-                        if (attempt === 0) showToast("正在開啟電池查詢…");
-                        win.setTimeout(() => tryOpenBattery(attempt + 1), 100);
+                try {{
+                    const batteryRuntime = win.__ubikeV29FastBattery;
+                    batteryRuntime?.repairFloatingButton?.();
+                    if (typeof batteryRuntime?.openBatteryQuery === "function") {{
+                        win.__ubikeBatteryOpenPending = false;
+                        batteryRuntime.openBatteryQuery();
                         return;
                     }}
-                    showToast("電池查詢元件載入失敗，請重新整理頁面");
-                }};
-                tryOpenBattery();
+                }} catch (_) {{}}
+
+                // Battery component may mount after the floating toolbar.
+                // Keep this click request until the battery engine consumes it.
+                win.__ubikeBatteryOpenPending = true;
+                try {{
+                    doc.dispatchEvent(new CustomEvent("ubike:open-battery"));
+                }} catch (_) {{}}
+                showToast("正在啟動電池查詢…");
             }}
 
             function isMobileLayout() {{''',
