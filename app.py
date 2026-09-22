@@ -14,8 +14,9 @@ executing it, this entrypoint applies focused V29 compatibility fixes:
    Streamlit geolocation bridge, without reloading the whole browser page;
 6. the floating battery query uses the V29 Fast Client battery engine and a
    mobile-safe one-way HTML UI, avoiding custom-component readiness failures;
-7. the V29 battery entry occupies the exact legacy battery-button slot so the
-   new engine replaces the old entry instead of appearing as a second control;
+7. the V29 battery entry is bridged into the same right-side floating action
+   stack as TOP/search/refresh, while the battery engine keeps a hidden fallback
+   trigger so the query page remains recoverable across Streamlit reruns;
 8. AI learning guard separates natural demand, confirmed manual intervention
    and suspected intervention before future model training;
 9. geolocation uses a visible direct user-triggered control before background
@@ -223,11 +224,21 @@ def render_floating_battery_query(
           const doc = win.document;
           const repairBatteryFab = () => {
             try { win.__ubikeV29FastBattery?.repairFloatingButton?.(); } catch (_) {}
+            const unifiedButton = doc.querySelector('#ubike-float-tools .uft-battery');
+            doc.body?.classList.toggle('ubike-unified-float-stack', Boolean(unifiedButton));
+            const fallbackFab = doc.getElementById('ub-v29-fab');
+            if (fallbackFab && unifiedButton) {
+              fallbackFab.setAttribute('aria-hidden', 'true');
+              fallbackFab.tabIndex = -1;
+            }
           };
           repairBatteryFab();
           win.setTimeout(repairBatteryFab, 60);
           win.setTimeout(repairBatteryFab, 250);
           win.setTimeout(repairBatteryFab, 900);
+          if (!win.__ubikeUnifiedFabInterval) {
+            win.__ubikeUnifiedFabInterval = win.setInterval(repairBatteryFab, 750);
+          }
           ['ubike-battery-fab', 'ubike-battery-page', 'ubike-battery-style'].forEach(id => {
             try { doc.getElementById(id)?.remove(); } catch (_) {}
           });
@@ -250,6 +261,12 @@ def render_floating_battery_query(
               border: 1px solid rgba(96, 232, 255, .65) !important;
               background: #07101c !important;
               box-shadow: 0 0 24px rgba(85,246,255,.38), 0 8px 28px rgba(0,0,0,.34) !important;
+            }
+            body.ubike-unified-float-stack #ub-v29-fab {
+              display: none !important;
+              visibility: hidden !important;
+              opacity: 0 !important;
+              pointer-events: none !important;
             }
             @media (max-width: 700px) {
               #ub-v29-fab {
@@ -1032,6 +1049,11 @@ _BUG_FIX_CONTENT_MD = """
 #### 🐞 BUG 修復紀錄
 > 僅記錄已實際完成的修復；單純新增功能不列入。
 
+**2026/09/22｜右側懸浮按鈕分離／電池入口被遮擋**
+- 將電池查詢入口併入既有 `#ubike-float-tools .uft-actions`，與 TOP、智慧調度、搜尋、更新共用同一條右側直列、間距與層級。
+- V29 電池引擎原本的獨立 FAB 改為隱藏式內部／備援觸發器；共用直列存在時不再另外佔一個 fixed 位置，避免互相覆蓋。
+- Streamlit rerun 後若偵測到舊版懸浮列缺少電池入口，會強制重建共用直列；電池引擎仍保留自我修復，不影響既有查詢功能。
+
 **2026/09/22｜更新內容入口重複／舊入口顯示過期內容**
 - 修復左側同時出現舊的頂部「更新內容」入口與新的 sidebar「更新內容」入口，造成操作重複且容易點到過期內容。
 - 已移除最上方舊入口，只保留左側「🆕 更新內容」；更新紀錄標題改為直接讀取目前系統版本，例如 V31 會顯示「V31 更新內容」。
@@ -1461,6 +1483,105 @@ replace_exact(
     browser_payload = None''',
     label="server live station scope",
 )
+
+# Keep every floating entry in one right-side stack. The visible battery button
+# lives inside the legacy floating action container; the V29 battery engine keeps
+# its own hidden FAB only as an internal/fallback trigger.
+replace_exact(
+    '''            if (win.__ubikeFloatingFingerprint === fingerprint && doc.getElementById("ubike-float-tools")) {{''',
+    '''            if (
+                win.__ubikeFloatingFingerprint === fingerprint
+                && doc.getElementById("ubike-float-tools")
+                && doc.querySelector("#ubike-float-tools .uft-battery")
+            ) {{''',
+    label="floating unified stack rebuild guard",
+)
+
+replace_exact(
+    '''                #ubike-float-tools .uft-refresh {{ background: linear-gradient(135deg, #0d8c70, #17699a); }}''',
+    '''                #ubike-float-tools .uft-refresh {{ background: linear-gradient(135deg, #0d8c70, #17699a); }}
+                #ubike-float-tools .uft-battery {{
+                    padding: 0;
+                    overflow: hidden;
+                    border: 1px solid rgba(96, 232, 255, .65);
+                    border-radius: 16px;
+                    background: #07101c;
+                    box-shadow: 0 0 24px rgba(85,246,255,.38), 0 8px 28px rgba(0,0,0,.34);
+                }}
+                #ubike-float-tools .uft-battery img {{
+                    width: 100%;
+                    height: 100%;
+                    display: block;
+                    object-fit: cover;
+                    border-radius: 15px;
+                    pointer-events: none;
+                    user-select: none;
+                    -webkit-user-drag: none;
+                }}''',
+    label="floating unified battery style",
+)
+
+_unified_battery_button_html = '''                <div class="uft-actions">
+                    <button class="uft-button uft-top" type="button" title="回到頁面最上方">TOP</button>
+                    {analysis_button_html}
+                    <button class="uft-button uft-search" type="button" title="搜尋場站（Ctrl + K）">🔎</button>
+                    <button class="uft-button uft-refresh" type="button" title="手動更新 YouBike 即時車數">更新</button>
+                </div>'''
+_unified_battery_button_replacement = '''                <div class="uft-actions">
+                    <button class="uft-button uft-battery" type="button" title="查詢 YouBike 2.0E 電量" aria-label="電量查詢">
+                        <img alt="" draggable="false" src="__BATTERY_ICON_DATA_URI__" />
+                    </button>
+                    <button class="uft-button uft-top" type="button" title="回到頁面最上方">TOP</button>
+                    {analysis_button_html}
+                    <button class="uft-button uft-search" type="button" title="搜尋場站（Ctrl + K）">🔎</button>
+                    <button class="uft-button uft-refresh" type="button" title="手動更新 YouBike 即時車數">更新</button>
+                </div>'''.replace("__BATTERY_ICON_DATA_URI__", BATTERY_ICON_DATA_URI)
+replace_exact(
+    _unified_battery_button_html,
+    _unified_battery_button_replacement,
+    label="floating unified battery button",
+)
+
+replace_exact(
+    '''            const topButton = root.querySelector(".uft-top");
+            const analysisButton = root.querySelector(".uft-analysis");''',
+    '''            const batteryButton = root.querySelector(".uft-battery");
+            const topButton = root.querySelector(".uft-top");
+            const analysisButton = root.querySelector(".uft-analysis");''',
+    label="floating unified battery reference",
+)
+
+replace_exact(
+    '''            function isMobileLayout() {{''',
+    '''            function openBatteryQuery() {{
+                try {{ win.__ubikeV29FastBattery?.repairFloatingButton?.(); }} catch (_) {{}}
+                const batteryFab = doc.getElementById("ub-v29-fab");
+                if (!batteryFab) {{
+                    showToast("電池查詢元件尚未準備完成，請稍後再按一次");
+                    return;
+                }}
+                batteryFab.click();
+            }}
+
+            function isMobileLayout() {{''',
+    label="floating unified battery open",
+)
+
+replace_exact(
+    '''                    "--ubike-float-toast-bottom",
+                    `${{bottomGap + 252}}px`,''',
+    '''                    "--ubike-float-toast-bottom",
+                    `${{bottomGap + 316}}px`,''',
+    label="floating toast stack height",
+)
+
+replace_exact(
+    '''            searchButton.addEventListener("click", () => setOpen(panel.hidden));''',
+    '''            batteryButton?.addEventListener("click", openBatteryQuery);
+            searchButton.addEventListener("click", () => setOpen(panel.hidden));''',
+    label="floating battery click binding",
+)
+
 
 # The floating refresh button now also asks the visible geolocation component
 # for a fresh GPS fix. That component acts as a bidirectional Streamlit bridge:
