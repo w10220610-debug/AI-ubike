@@ -335,6 +335,11 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
    }catch(_){}
  }
 
+ // Expose stable controls to the unified right-side floating toolbar.
+ // This avoids depending on whether the hidden fallback FAB has mounted yet.
+ runtime.openBatteryQuery=open;
+ runtime.closeBatteryQuery=close;
+
  // Parent-window watchdog: survives Streamlit component iframe replacement/reruns.
  runtime.repairFloatingButton=repairFloatingButton;
  runtime.refreshViews=refreshViews;
