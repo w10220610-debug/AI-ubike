@@ -141,10 +141,7 @@ def test_configured_app_rerun_keeps_data_and_mode(tmp_path, monkeypatch):
     import pandas as pd
     from streamlit.testing.v1 import AppTest
     import battery_upgrade as battery
-    import ai_learning_guard
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(ai_learning_guard, "SHARED_LEARNING_POOL_PATH", tmp_path / "learning.json")
-    monkeypatch.setattr(ai_learning_guard, "SHARED_DISPATCHER_LOCATION_PATH", tmp_path / "locations.json")
     path = Path(__file__).resolve().parents[1] / "app.py"
     rows = []
     for zone in ("D1", "D2", "D3"):
