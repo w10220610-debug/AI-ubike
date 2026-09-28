@@ -397,4 +397,4 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
  stopLocationWatch();ensure();render();repairFloatingButton();
 })();
 </script></body></html>'''.replace('__ARGS__', payload)
-    st.iframe(html_text, height=0, tab_index=-1)
+    st.iframe(html_text, height=1, tab_index=-1)
