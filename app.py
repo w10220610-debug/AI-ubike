@@ -20,14 +20,23 @@ executing it, this entrypoint applies focused V29 compatibility fixes:
 8. AI learning guard separates natural demand, confirmed manual intervention
    and suspected intervention before future model training;
 9. geolocation uses a visible direct user-triggered control before background
-   refresh, improving iPhone/in-app-browser permission reliability.
+   refresh, improving iPhone/in-app-browser permission reliability;
+10. legacy one-way HTML shims are upgraded to Streamlit's native st.iframe API,
+    eliminating deprecated components.v1.html warning spam;
+11. the unified floating toolbar is guarded from the parent window and restores
+    itself after Streamlit DOM redraws, mobile viewport changes and reruns;
+12. background GPS errors are de-duplicated and hidden-page work is minimized so
+    a temporary positioning failure cannot cause repeated unnecessary reruns.
 """
 
 import json
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+import streamlit as st
 
 from ai_learning_guard import (
     MAX_MANUAL_EVENTS,
@@ -236,8 +245,9 @@ def render_floating_battery_query(
           win.setTimeout(repairBatteryFab, 60);
           win.setTimeout(repairBatteryFab, 250);
           win.setTimeout(repairBatteryFab, 900);
-          if (!win.__ubikeUnifiedFabInterval) {
-            win.__ubikeUnifiedFabInterval = win.setInterval(repairBatteryFab, 750);
+          if (win.__ubikeUnifiedFabInterval) {
+            win.clearInterval(win.__ubikeUnifiedFabInterval);
+            win.__ubikeUnifiedFabInterval = null;
           }
           ['ubike-battery-fab', 'ubike-battery-page', 'ubike-battery-style'].forEach(id => {
             try { doc.getElementById(id)?.remove(); } catch (_) {}
@@ -350,10 +360,10 @@ def render_floating_battery_query(
         })();
         </script>
         '''
-    components.html(
+    st.iframe(
         icon_html.replace("__BATTERY_ICON_DATA_URI__", BATTERY_ICON_DATA_URI),
         height=0,
-        scrolling=False,
+        tab_index=-1,
     )
 
 
@@ -1007,6 +1017,14 @@ replace_exact(
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
 
+**2026/09/28｜全系統底層優化（保留現有功能）**
+- 將舊的 `st.components.v1.html` 一次性相容升級為 Streamlit 1.59 原生 `st.iframe`，停止 deprecated warning 反覆洗 Log。
+- 右側電池／TOP／分析／搜尋／更新改由同一個 parent-window 守護機制維持；Streamlit rerun 或手機 DOM 重畫後會自動復原，不再依賴多組重複輪詢。
+- 電池頁只在真正需要時啟動自己的 GPS watch，關閉電池頁即停止，並降低 MutationObserver／interval 的無效工作量。
+- 共用定位對重複的自動定位錯誤做節流，避免權限／訊號暫時失敗時每 30 秒觸發不必要 rerun；手動更新仍立即回報。
+- requirements 直接限制 pyarrow 24.x，避免 Community Cloud 每次部署先安裝 25.x 再自動降版，縮短啟動流程。
+- 不變更 Excel 配置、智慧調度演算法、優先場站、載量限制、電池門檻與既有操作方式。
+
 **2026/09/22｜效能優化（保留現有功能）**
 - 電池場站配對結果加入有容量上限的快取；配置或官方清單改變時重新配對，不延長電量快取時間。
 - 修補後的程式碼加入編譯快取；原始碼變更立即重新編譯，各使用者操作狀態仍獨立。
@@ -1048,6 +1066,12 @@ replace_exact(
 _BUG_FIX_CONTENT_MD = """
 #### 🐞 BUG 修復紀錄
 > 僅記錄已實際完成的修復；單純新增功能不列入。
+
+**2026/09/28｜懸浮按鈕再次消失／舊 HTML 元件反覆洗 Log**
+- 修復 Streamlit rerun／手機 DOM 重畫後 `#ubike-float-tools` 被移除卻未重新掛回的情況；共用懸浮列現在由 parent window 單一 watchdog 自我復原。
+- 淘汰持續 750ms 重複掃描的第二套懸浮按鈕輪詢，保留事件式 MutationObserver ＋低頻備援檢查，降低手機長時間使用負擔。
+- 舊 `components.html` 改由 `st.iframe` 執行，同源 JavaScript bridge 保留，因此 TOP／分析／搜尋／更新／電池功能不變。
+- 自動定位錯誤加入去重與節流，避免 GPS 暫時失敗時持續造成 Streamlit rerun 與相同錯誤訊息。
 
 **2026/09/22｜右側懸浮按鈕分離／電池入口被遮擋**
 - 將電池查詢入口併入既有 `#ubike-float-tools .uft-actions`，與 TOP、智慧調度、搜尋、更新共用同一條右側直列、間距與層級。
@@ -1236,11 +1260,26 @@ replace_exact(
     const seconds = Math.max(10, Math.min(300, Number(args.auto_refresh_seconds || 30)));
     autoTimer = window.setTimeout(() => {
       autoTimer = null;
+      if (document.hidden) {
+        scheduleAutoLocate();
+        return;
+      }
       if (busy) scheduleAutoLocate();
       else runLocate({ automatic: true });
     }, seconds * 1000);
   }''',
     label="geolocation wait for direct user gesture",
+)
+
+replace_exact(
+    '''  let lastDeliveredLocation = null;
+  const LOCATION_HEARTBEAT_MS = 5 * 60 * 1000;''',
+    '''  let lastDeliveredLocation = null;
+  let lastAutoErrorKey = "";
+  let lastAutoErrorDeliveredAt = 0;
+  const LOCATION_HEARTBEAT_MS = 5 * 60 * 1000;
+  const AUTO_ERROR_HEARTBEAT_MS = 5 * 60 * 1000;''',
+    label="geolocation duplicate error state",
 )
 
 replace_exact(
@@ -1268,13 +1307,24 @@ replace_exact(
         } else if (code === 3) {
           message = "定位逾時；請到室外或靠近窗邊後再試一次";
         }
-        setValue({
-          ok: false,
-          event_id: eventId(),
-          request_token: String(args.request_token || ""),
-          manual_live_refresh: Boolean(requestLiveRefresh),
-          error: message,
-        });
+        const nowMilliseconds = Date.now();
+        const errorKey = `${code}:${message}`;
+        const shouldDeliverError = !automatic
+          || forceDelivery
+          || requestLiveRefresh
+          || errorKey !== lastAutoErrorKey
+          || nowMilliseconds - lastAutoErrorDeliveredAt >= AUTO_ERROR_HEARTBEAT_MS;
+        if (shouldDeliverError) {
+          setValue({
+            ok: false,
+            event_id: eventId(),
+            request_token: String(args.request_token || ""),
+            manual_live_refresh: Boolean(requestLiveRefresh),
+            error: message,
+          });
+          lastAutoErrorKey = errorKey;
+          lastAutoErrorDeliveredAt = nowMilliseconds;
+        }
         setStatus(`定位失敗：${message}`, true);
         busy = false;
         button.disabled = false;
@@ -1493,7 +1543,8 @@ replace_exact(
     '''            if (win.__ubikeFloatingFingerprint === fingerprint && doc.getElementById("ubike-float-tools")) {{''',
     '''            if (
                 win.__ubikeFloatingFingerprint === fingerprint
-                && doc.getElementById("ubike-float-tools")?.dataset?.stackVersion === "3"
+                && doc.getElementById("ubike-float-tools")?.dataset?.stackVersion === "4"
+                && doc.getElementById("ubike-float-tools-style")
                 && doc.querySelector("#ubike-float-tools .uft-battery")
             ) {{''',
     label="floating unified stack rebuild guard",
@@ -1550,7 +1601,7 @@ replace_exact(
             root.innerHTML = `''',
     '''            const root = doc.createElement("div");
             root.id = "ubike-float-tools";
-            root.dataset.stackVersion = "3";
+            root.dataset.stackVersion = "4";
             root.innerHTML = `''',
     label="floating unified stack version",
 )
@@ -1605,6 +1656,73 @@ replace_exact(
     label="floating battery click binding",
 )
 
+
+replace_exact(
+    '''            // 舊版若已建立 MutationObserver，先關閉；之後只在視窗尺寸改變時更新。
+            if (win.__ubikeFloatingObserver) {{
+                win.__ubikeFloatingObserver.disconnect();
+                win.__ubikeFloatingObserver = null;
+            }}
+
+            updateFloatingPosition();
+            win.setTimeout(updateFloatingPosition, 350);
+            renderResults("");''',
+    '''            // 單一 parent-window watchdog：Streamlit rerun／手機 DOM 重畫後自動掛回同一組懸浮工具。
+            if (win.__ubikeFloatingObserver) {{
+                try {{ win.__ubikeFloatingObserver.disconnect(); }} catch (_error) {{}}
+                win.__ubikeFloatingObserver = null;
+            }}
+
+            const restoreFloatingTools = () => {{
+                try {{
+                    if (!doc.getElementById("ubike-float-tools-style")) {{
+                        doc.head?.appendChild(style);
+                    }}
+                    if (!doc.getElementById("ubike-float-tools")) {{
+                        doc.body?.appendChild(root);
+                    }}
+                    root.hidden = false;
+                    root.style.display = "";
+                    updateFloatingPosition();
+                }} catch (_error) {{}}
+            }};
+            win.__ubikeFloatingRestore = restoreFloatingTools;
+
+            let floatingRepairTimer = null;
+            try {{
+                win.__ubikeFloatingObserver = new MutationObserver(() => {{
+                    const missingRoot = !doc.getElementById("ubike-float-tools");
+                    const missingStyle = !doc.getElementById("ubike-float-tools-style");
+                    if (!missingRoot && !missingStyle) return;
+                    win.clearTimeout(floatingRepairTimer);
+                    floatingRepairTimer = win.setTimeout(restoreFloatingTools, 40);
+                }});
+                win.__ubikeFloatingObserver.observe(doc.documentElement, {{
+                    childList: true,
+                    subtree: true,
+                }});
+            }} catch (_error) {{}}
+
+            if (win.__ubikeFloatingPageShowHandler) {{
+                win.removeEventListener("pageshow", win.__ubikeFloatingPageShowHandler);
+            }}
+            win.__ubikeFloatingPageShowHandler = restoreFloatingTools;
+            win.addEventListener("pageshow", win.__ubikeFloatingPageShowHandler, {{ passive: true }});
+
+            if (win.__ubikeFloatingVisibilityHandler) {{
+                doc.removeEventListener("visibilitychange", win.__ubikeFloatingVisibilityHandler);
+            }}
+            win.__ubikeFloatingVisibilityHandler = () => {{
+                if (!doc.hidden) restoreFloatingTools();
+            }};
+            doc.addEventListener("visibilitychange", win.__ubikeFloatingVisibilityHandler, {{ passive: true }});
+
+            restoreFloatingTools();
+            win.setTimeout(restoreFloatingTools, 120);
+            win.setTimeout(restoreFloatingTools, 700);
+            renderResults("");''',
+    label="floating parent watchdog",
+)
 
 # The floating refresh button now also asks the visible geolocation component
 # for a fresh GPS fix. That component acts as a bidirectional Streamlit bridge:
@@ -1859,4 +1977,13 @@ replace_exact(
     label="smart dispatch priority candidate badge",
 )
 
+def _modernize_legacy_iframes(legacy_source: str) -> str:
+    """Use Streamlit's supported same-origin iframe API without changing legacy JS."""
+    modern = legacy_source.replace("components.html(", "st.iframe(")
+    modern = modern.replace("scrolling=False,", "")
+    modern = modern.replace(", scrolling=False", "")
+    return modern
+
+
+source = _modernize_legacy_iframes(source)
 exec(compile_legacy_source(source, str(LEGACY_APP)), globals(), globals())
