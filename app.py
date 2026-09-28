@@ -1067,6 +1067,10 @@ _BUG_FIX_CONTENT_MD = """
 #### 🐞 BUG 修復紀錄
 > 僅記錄已實際完成的修復；單純新增功能不列入。
 
+**2026/09/28｜st.iframe 高度相容修復**
+- 修復全系統優化期間將舊的 0px 隱藏 component 直接遷移到 `st.iframe(height=0)`，被 Streamlit 1.59 判定為無效高度並拋出 `StreamlitInvalidHeightError` 的啟動錯誤。
+- 所有隱藏 bridge 改為最小 1px 高度；舊 UI 動態轉換器也會自動把 `height=0` 正規化成 `height=1`，避免其他舊元件再次觸發同類錯誤。
+
 **2026/09/28｜懸浮按鈕再次消失／舊 HTML 元件反覆洗 Log**
 - 修復 Streamlit rerun／手機 DOM 重畫後 `#ubike-float-tools` 被移除卻未重新掛回的情況；共用懸浮列現在由 parent window 單一 watchdog 自我復原。
 - 淘汰持續 750ms 重複掃描的第二套懸浮按鈕輪詢，保留事件式 MutationObserver ＋低頻備援檢查，降低手機長時間使用負擔。
