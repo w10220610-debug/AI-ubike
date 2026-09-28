@@ -41,10 +41,15 @@ import streamlit as st
 from battery_icon_data import BATTERY_ICON_DATA_URI
 from battery_upgrade import render_floating_server_battery as _render_floating_server_battery
 from performance_cache import compile_legacy_source
+from streamlit_component_compat import install_component_declare_compat
 
 
 LEGACY_APP = Path(__file__).with_name("legacy_ui.py")
 source = LEGACY_APP.read_text(encoding="utf-8")
+
+# Legacy custom components still need the Streamlit 1.59 compatibility shim.
+# This is infrastructure only; it is independent from the removed learning system.
+install_component_declare_compat()
 
 
 APP_TIMEZONE = ZoneInfo("Asia/Taipei")
