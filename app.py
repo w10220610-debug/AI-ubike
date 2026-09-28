@@ -17,20 +17,20 @@ executing it, this entrypoint applies focused V29 compatibility fixes:
 7. the V29 battery entry is bridged into the same right-side floating action
    stack as TOP/search/refresh, while the battery engine keeps a hidden fallback
    trigger so the query page remains recoverable across Streamlit reruns;
-8. AI learning guard separates natural demand, confirmed manual intervention
-   and suspected intervention before future model training;
-9. geolocation uses a visible direct user-triggered control before background
+8. geolocation uses a visible direct user-triggered control before background
    refresh, improving iPhone/in-app-browser permission reliability;
-10. legacy one-way HTML shims are upgraded to Streamlit's native st.iframe API,
-    eliminating deprecated components.v1.html warning spam;
-11. the unified floating toolbar is guarded from the parent window and restores
+9. legacy one-way HTML shims are upgraded to Streamlit's native st.iframe API,
+   eliminating deprecated components.v1.html warning spam;
+10. the unified floating toolbar is guarded from the parent window and restores
     itself after Streamlit DOM redraws, mobile viewport changes and reruns;
-12. background GPS errors are de-duplicated and hidden-page work is minimized so
-    a temporary positioning failure cannot cause repeated unnecessary reruns.
+11. background GPS errors are de-duplicated and hidden-page work is minimized so
+    a temporary positioning failure cannot cause repeated unnecessary reruns;
+12. the retired AI learning/transition subsystem has been removed completely
+    from the runtime; smart dispatch continues to use its existing deterministic
+    station, load, road-time and efficiency rules.
 """
 
 import json
-import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -38,12 +38,6 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 
-from ai_learning_guard import (
-    MAX_MANUAL_EVENTS,
-    build_manual_intervention_event,
-    classify_live_transition,
-    trim_learning_records,
-)
 from battery_icon_data import BATTERY_ICON_DATA_URI
 from battery_upgrade import render_floating_server_battery as _render_floating_server_battery
 from performance_cache import compile_legacy_source
@@ -53,167 +47,23 @@ LEGACY_APP = Path(__file__).with_name("legacy_ui.py")
 source = LEGACY_APP.read_text(encoding="utf-8")
 
 
-AI_TIMEZONE = ZoneInfo("Asia/Taipei")
-AI_NIGHT_SHIFT_END_HOUR = 7
-AI_NIGHT_SHIFT_END_MINUTE = 30
-AI_LEARNING_META_KEY = "__ai_learning__"
+APP_TIMEZONE = ZoneInfo("Asia/Taipei")
+NIGHT_SHIFT_END_HOUR = 7
+NIGHT_SHIFT_END_MINUTE = 30
 
 
-def resolve_ai_shift_context(shift: str, now: datetime | None = None) -> dict[str, str]:
-    """Resolve the main-page shift into the AI learning day context.
-
-    Early/late shifts follow the normal calendar day. The legacy ``夜班配置``
-    is the user's 大夜 shift: before/through 07:30 it belongs to the calendar
-    day already reached after midnight; after 07:30 it belongs to the next
-    operating day. This keeps one 21:30-07:30 shift on one learning date.
-    """
-    local_now = now.astimezone(AI_TIMEZONE) if now is not None else datetime.now(AI_TIMEZONE)
-    raw_shift = str(shift or "").strip()
-
-    if "大夜" in raw_shift or ("夜班" in raw_shift and "晚班" not in raw_shift):
-        shift_label = "大夜"
-    elif "早班" in raw_shift:
-        shift_label = "早班"
-    elif "晚班" in raw_shift:
-        shift_label = "晚班"
-    else:
-        shift_label = raw_shift.replace("配置", "") or "未設定"
-
+def _operating_date_for_shift(selected_shift: str) -> str:
+    """Return the operating date used to scope priority-station tasks."""
+    local_now = datetime.now(APP_TIMEZONE)
     operating_date = local_now.date()
-    if shift_label == "大夜":
-        current_hm = (local_now.hour, local_now.minute)
-        night_end_hm = (AI_NIGHT_SHIFT_END_HOUR, AI_NIGHT_SHIFT_END_MINUTE)
-        if current_hm > night_end_hm:
-            operating_date += timedelta(days=1)
-
-    day_type = "假日" if operating_date.weekday() >= 5 else "平日"
-    return {
-        "source_shift": raw_shift,
-        "shift": shift_label,
-        "day_type": day_type,
-        "operating_date": operating_date.isoformat(),
-        "actual_datetime": local_now.isoformat(),
-    }
-
-
-def _ai_learning_meta(status_cache: dict) -> dict:
-    metadata = status_cache.setdefault("metadata", {})
-    learning = metadata.setdefault(AI_LEARNING_META_KEY, {})
-    if not isinstance(learning, dict):
-        learning = {}
-        metadata[AI_LEARNING_META_KEY] = learning
-    return learning
-
-
-def render_ai_learning_guard_controls(
-    base_df,
-    *,
-    active_base: dict,
-    status_cache: dict,
-) -> None:
-    """Compact manual-intervention recorder shared by analysis/dispatch pages."""
-    if base_df is None or getattr(base_df, "empty", True) or "場站名稱" not in base_df.columns:
-        return
-
-    station_names = [
-        name
-        for name in dict.fromkeys(str(value or "").strip() for value in base_df["場站名稱"].tolist())
-        if name
-    ]
-    if not station_names:
-        return
-
-    learning = _ai_learning_meta(status_cache)
-    manual_events = learning.setdefault("manual_events", [])
-    if not isinstance(manual_events, list):
-        manual_events = []
-        learning["manual_events"] = manual_events
-    summary = learning.get("last_summary", {})
-    if not isinstance(summary, dict):
-        summary = {}
-
-    token = str(active_base.get("token") or "default")
-    ai_context = st.session_state.get("ai_shift_context", {})
-    with st.expander("🛠️ AI 人工調度紀錄", expanded=False):
-        st.caption(
-            "有自行調度時記一筆即可。正數＝補進場站，負數＝從場站載走；"
-            "兩欄都填 0 也可只標記『此站有人工作業』。"
-        )
-        if summary:
-            st.caption(
-                "最近一次同步分類｜"
-                f"自然 {int(summary.get('natural', 0))}｜"
-                f"人工 {int(summary.get('manual_intervention', 0))}｜"
-                f"疑似人工 {int(summary.get('suspected_intervention', 0))}"
-            )
-
-        station_name = st.selectbox(
-            "場站",
-            station_names,
-            key=f"ai_manual_station::{token}",
-        )
-        c1, c2 = st.columns(2)
-        with c1:
-            bike_delta = int(
-                st.number_input(
-                    "2.0 變化",
-                    min_value=-30,
-                    max_value=30,
-                    value=0,
-                    step=1,
-                    key=f"ai_manual_bike_delta::{token}",
-                )
-            )
-        with c2:
-            ebike_delta = int(
-                st.number_input(
-                    "2.0E 變化",
-                    min_value=-30,
-                    max_value=30,
-                    value=0,
-                    step=1,
-                    key=f"ai_manual_ebike_delta::{token}",
-                )
-            )
-
-        if st.button(
-            "記錄人工調度",
-            use_container_width=True,
-            key=f"ai_manual_save::{token}",
+    raw_shift = str(selected_shift or "").strip()
+    if "大夜" in raw_shift or ("夜班" in raw_shift and "晚班" not in raw_shift):
+        if (local_now.hour, local_now.minute) > (
+            NIGHT_SHIFT_END_HOUR,
+            NIGHT_SHIFT_END_MINUTE,
         ):
-            event = build_manual_intervention_event(
-                station_name=station_name,
-                bike_delta=bike_delta,
-                ebike_delta=ebike_delta,
-                ai_context=ai_context,
-            )
-            manual_events.append(event)
-            learning["manual_events"] = manual_events[-MAX_MANUAL_EVENTS:]
-            save_cached_status(
-                active_base["token"],
-                active_base.get("expires_at"),
-                status_cache,
-            )
-            st.success(f"已標記人工調度：{station_name}")
-
-        recent = [item for item in manual_events if isinstance(item, dict)][-3:]
-        if recent:
-            st.caption("最近人工紀錄")
-            for event in reversed(recent):
-                try:
-                    when = datetime.fromtimestamp(
-                        float(event.get("recorded_at_epoch") or 0),
-                        AI_TIMEZONE,
-                    ).strftime("%H:%M:%S")
-                except (TypeError, ValueError, OSError):
-                    when = "—"
-                bike = int(event.get("bike_delta") or 0)
-                ebike = int(event.get("ebike_delta") or 0)
-                used = "｜已套用" if event.get("consumed") else "｜待下次同步"
-                st.caption(
-                    f"{when}｜{event.get('station_name', '')}｜"
-                    f"2.0 {bike:+d}｜2.0E {ebike:+d}{used}"
-                )
+            operating_date += timedelta(days=1)
+    return operating_date.isoformat()
 
 
 def render_floating_battery_query(
@@ -379,18 +229,8 @@ def _priority_station_key(value) -> str:
 
 def _priority_scope_id(selected_shift: str = "") -> str:
     """優先清單以營運日＋班別分開，避免隔天仍把昨天已完成任務算進本班。"""
-    context = st.session_state.get("ai_shift_context", {})
-    if not isinstance(context, dict):
-        context = {}
-    operating_date = str(context.get("operating_date") or "").strip()
-    if not operating_date:
-        operating_date = datetime.now(AI_TIMEZONE).date().isoformat()
-    shift_label = str(
-        selected_shift
-        or context.get("source_shift")
-        or context.get("shift")
-        or "未設定班別"
-    ).strip()
+    shift_label = str(selected_shift or "未設定班別").strip()
+    operating_date = _operating_date_for_shift(shift_label)
     return f"{operating_date}｜{shift_label}"
 
 
@@ -495,9 +335,9 @@ def apply_priority_station_order(
 ) -> list[dict]:
     """優先清單只標記必處理站，不採用人工清單順序決定路線。
 
-    智慧調度仍以原本 AI 候選排序為基礎：車上 2.0／2.0E、剩餘載量、
+    智慧調度仍以原本 智慧候選排序為基礎：車上 2.0／2.0E、剩餘載量、
     場站缺多、道路時間與路線預看都先算完；可執行的優先站會集中在
-    一般站之前，但多個優先站彼此之間完全沿用 AI 算出的效率順序。
+    一般站之前，但多個優先站彼此之間完全沿用 智慧調度算出的效率順序。
     """
     if not candidates:
         return candidates
@@ -507,23 +347,23 @@ def apply_priority_station_order(
         for name in _priority_pending_names(status_cache, selected_shift)
     }
     prepared: list[dict] = []
-    for ai_rank, candidate in enumerate(candidates, start=1):
+    for smart_rank, candidate in enumerate(candidates, start=1):
         item = dict(candidate)
         is_priority = (
             _priority_station_key(item.get("station_name"))
             in priority_keys
         )
-        item["_ai_rank"] = ai_rank
+        item["_smart_rank"] = smart_rank
         item["_is_priority_task"] = bool(is_priority)
         # 保留欄位給既有 UI 相容，但不再使用人工清單名次排序。
         item["_priority_rank"] = 1 if is_priority else 0
         prepared.append(item)
 
-    # 關鍵：優先站之間只依 AI 原始排名，不依使用者在待辦清單的上下順序。
+    # 關鍵：優先站之間只依 智慧原始排名，不依使用者在待辦清單的上下順序。
     prepared.sort(
         key=lambda item: (
             0 if bool(item.get("_is_priority_task")) else 1,
-            int(item.get("_ai_rank") or 999999),
+            int(item.get("_smart_rank") or 999999),
         )
     )
     return prepared
@@ -905,7 +745,7 @@ def render_priority_station_manager(
                 try:
                     completed_time = datetime.fromtimestamp(
                         completed_epoch,
-                        AI_TIMEZONE,
+                        APP_TIMEZONE,
                     ).strftime("%H:%M")
                 except (TypeError, ValueError, OSError):
                     completed_time = "—"
@@ -992,16 +832,6 @@ replace_exact(
     label="uploaded-workbook battery range",
 )
 
-# General-analysis rows reserve a compact AI prediction line now. Until the
-# learning database/model is connected, show an explicit learning state rather
-# than inventing a forecast. The same slot can later render 30m/risk output.
-replace_exact(
-    """            f'<small>{"｜".join(station_meta)}</small></td>'""",
-    """            f'<small>{"｜".join(station_meta)}</small>'
-            f'<small class="analysis-ai-prediction" style="color:#55f6ff;opacity:.92;font-weight:850;">🔮 AI 預測：學習中</small></td>'""",
-    label="general analysis AI prediction slot",
-)
-
 replace_exact(
     '''st.set_page_config(
     page_title=f"臺東 YouBike 智慧調度｜{APP_VERSION_NAME}",
@@ -1016,6 +846,12 @@ replace_exact(
 
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
+
+**2026/09/28｜移除 AI 學習系統**
+- 完整移除 AI 學習資料收集、自然／人工／疑似人工變化分類、人工調度紀錄面板、學習中預測欄位與遠端 Supabase 學習池。
+- 即時車數更新不再複製整份場站 DataFrame 給學習模組，也不再寫入／同步學習紀錄。
+- 保留智慧調度既有規則：車上 2.0／2.0E、載量、場站缺多車、道路時間、優先場站與路線效率均不受影響。
+- 舊快取中的 `__ai_learning__` metadata 會在載入時自動清除一次，避免殘留資料繼續佔用。
 
 **2026/09/28｜全系統底層優化（保留現有功能）**
 - 將舊的 `st.components.v1.html` 一次性相容升級為 Streamlit 1.59 原生 `st.iframe`，停止 deprecated warning 反覆洗 Log。
@@ -1048,9 +884,6 @@ _UPDATE_CONTENT_MD = f"""
 - 右側更新按鈕可重新取得即時場站資料。
 - 電池查詢已升級為 V29 Fast Client：並行查詢、逐站回填，不阻塞主畫面。
 - 電池場站展開後，低電車明細依柱號由小到大排列。
-- AI 班別直接跟隨主頁班別；早班／晚班用當天，大夜用跨日後的營運日判斷平日／假日。
-- 一般分析的場站列已加入 AI 預測位置；模型尚未接入時明確顯示「學習中」。
-- AI 學習防污染：自然流量、人工調度、疑似人工調度分開標記；人工資料不進自然需求訓練。
 - iPhone 定位改為可見的直接定位按鈕；第一次由使用者點擊授權，成功後再進行背景更新。
 - 新版電池入口沿用舊按鈕位置，並保留新版電池圖示。
 """''',
@@ -1153,96 +986,6 @@ with st.sidebar:
     with st.expander("🐞 BUG修復內容", expanded=False):
         st.markdown(_BUG_FIX_CONTENT_MD)''',
     label="sidebar bug fix history",
-)
-
-replace_exact(
-    '''    selected_shift = st.selectbox(
-        "班別",
-        list(SHIFT_COLUMNS.keys()),
-        key=f"shift::{active_base['token']}",
-    )
-    page_mode = st.radio(''',
-    '''    selected_shift = st.selectbox(
-        "班別",
-        list(SHIFT_COLUMNS.keys()),
-        key=f"shift::{active_base['token']}",
-    )
-    _ai_shift_context = resolve_ai_shift_context(selected_shift)
-    st.session_state["ai_shift_context"] = _ai_shift_context
-    st.caption(
-        f"🤖 AI 模式：{_ai_shift_context['day_type']}・{_ai_shift_context['shift']}"
-    )
-    page_mode = st.radio(''',
-    label="AI shift day context",
-)
-
-replace_exact(
-    '''render_context_strip(
-    route=f"{selected_configuration_type}｜D1／D2／D3",
-    shift=selected_shift,
-    station_count=len(base_df),
-    page_mode=page_mode,
-    live_meta=previous_live_meta,
-)
-render_binding_vehicle_requirements(base_df, selected_shift=selected_shift)''',
-    '''render_context_strip(
-    route=f"{selected_configuration_type}｜D1／D2／D3",
-    shift=selected_shift,
-    station_count=len(base_df),
-    page_mode=page_mode,
-    live_meta=previous_live_meta,
-)
-render_ai_learning_guard_controls(
-    base_df,
-    active_base=active_base,
-    status_cache=status_cache,
-)
-render_binding_vehicle_requirements(base_df, selected_shift=selected_shift)''',
-    label="AI manual intervention recorder",
-)
-
-replace_exact(
-    '''                    else:
-                        base_df = live_updated_df
-                        live_event_id = str(live_payload.get("event_id") or browser_event_id or "")
-                        common_live_meta = {''',
-    '''                    else:
-                        previous_ai_df = base_df.copy(deep=True)
-                        base_df = live_updated_df
-                        live_event_id = str(live_payload.get("event_id") or browser_event_id or "")
-
-                        ai_learning_meta = _ai_learning_meta(status_cache)
-                        ai_transition = classify_live_transition(
-                            previous_ai_df,
-                            base_df,
-                            manual_events=ai_learning_meta.get("manual_events", []),
-                            ai_context=st.session_state.get("ai_shift_context", {}),
-                            observed_at_epoch=time.time(),
-                            source_event_id=live_event_id,
-                        )
-                        ai_learning_meta["manual_events"] = ai_transition["manual_events"]
-                        changed_ai_records = [
-                            record
-                            for record in ai_transition["records"]
-                            if (
-                                record.get("classification") in {
-                                    "manual_intervention",
-                                    "suspected_intervention",
-                                }
-                                or record.get("bike_delta") not in (None, 0)
-                                or record.get("ebike_delta") not in (None, 0)
-                            )
-                        ]
-                        existing_ai_records = ai_learning_meta.get("transitions", [])
-                        if not isinstance(existing_ai_records, list):
-                            existing_ai_records = []
-                        existing_ai_records.extend(changed_ai_records)
-                        ai_learning_meta["transitions"] = trim_learning_records(existing_ai_records)
-                        ai_learning_meta["last_summary"] = ai_transition["summary"]
-                        ai_learning_meta["last_observed_at_epoch"] = ai_transition["observed_at_epoch"]
-
-                        common_live_meta = {''',
-    label="AI live transition classification",
 )
 
 # iPhone/in-app-browser geolocation fix. Do not schedule background geolocation
@@ -1954,7 +1697,7 @@ replace_exact(
         "使用者指定下一站"
         if manual_station_name
         else (
-            "🚨 優先場站｜AI 最佳下一站"
+            "🚨 優先場站｜智慧最佳下一站"
             if recommended_priority_rank is not None
             else (
                 "🔄 準備調度｜為優先場站調整車況"
@@ -1967,19 +1710,31 @@ replace_exact(
 )
 
 replace_exact(
-    '''            rank_text = "🤖 AI 首選" if rank == 1 else f"第 {rank} 名"''',
+    '''            rank_text = "智慧首選" if rank == 1 else f"第 {rank} 名"''',
     '''            priority_rank = safe_nonnegative_int(candidate.get("_priority_rank"))
-            ai_rank = safe_nonnegative_int(candidate.get("_ai_rank")) or rank
+            smart_rank = safe_nonnegative_int(candidate.get("_smart_rank")) or rank
             if priority_rank:
-                rank_text = f"🚨 優先場站｜AI 第 {ai_rank} 名"
+                rank_text = f"🚨 優先場站｜智慧第 {smart_rank} 名"
             elif priority_route_state.get("has_pending"):
-                rank_text = f"🔄 一般準備站｜AI 第 {ai_rank} 名"
+                rank_text = f"🔄 一般準備站｜智慧第 {smart_rank} 名"
             elif ai_rank == 1:
-                rank_text = "🤖 AI 首選"
+                rank_text = "智慧首選"
             else:
-                rank_text = f"AI 第 {ai_rank} 名"''',
+                rank_text = f"智慧第 {smart_rank} 名"''',
     label="smart dispatch priority candidate badge",
 )
+
+replace_exact(
+    '''status_cache = load_cached_status(active_base["token"], active_base["expires_at"])''',
+    '''status_cache = load_cached_status(active_base["token"], active_base["expires_at"])
+_legacy_learning_removed = False
+if isinstance(status_cache.get("metadata"), dict):
+    _legacy_learning_removed = status_cache["metadata"].pop("__ai_learning__", None) is not None
+if _legacy_learning_removed:
+    save_cached_status(active_base["token"], active_base.get("expires_at"), status_cache)''',
+    label="purge retired learning metadata",
+)
+
 
 def _modernize_legacy_iframes(legacy_source: str) -> str:
     """Use Streamlit's supported same-origin iframe API without changing legacy JS."""
