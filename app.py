@@ -1715,14 +1715,14 @@ replace_exact(
 )
 
 replace_exact(
-    '''            rank_text = "智慧首選" if rank == 1 else f"第 {rank} 名"''',
+    '''            rank_text = "🤖 AI 首選" if rank == 1 else f"第 {rank} 名"''',
     '''            priority_rank = safe_nonnegative_int(candidate.get("_priority_rank"))
             smart_rank = safe_nonnegative_int(candidate.get("_smart_rank")) or rank
             if priority_rank:
                 rank_text = f"🚨 優先場站｜智慧第 {smart_rank} 名"
             elif priority_route_state.get("has_pending"):
                 rank_text = f"🔄 一般準備站｜智慧第 {smart_rank} 名"
-            elif ai_rank == 1:
+            elif smart_rank == 1:
                 rank_text = "智慧首選"
             else:
                 rank_text = f"智慧第 {smart_rank} 名"''',
