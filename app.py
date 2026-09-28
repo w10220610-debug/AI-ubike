@@ -362,7 +362,7 @@ def render_floating_battery_query(
         '''
     st.iframe(
         icon_html.replace("__BATTERY_ICON_DATA_URI__", BATTERY_ICON_DATA_URI),
-        height=0,
+        height=1,
         tab_index=-1,
     )
 
@@ -1482,7 +1482,7 @@ replace_exact(
                 )
                 st.iframe(
                     f"<script>window.parent.postMessage({event_payload}, '*');</script>",
-                    height=0,
+                    height=1,
                     tab_index=-1,
                 )
             except Exception:
