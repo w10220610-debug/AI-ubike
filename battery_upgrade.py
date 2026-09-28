@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-import streamlit.components.v1 as components
+import streamlit as st
 
 import ai_learning_guard as _ai_learning_guard_module
 from persistent_learning_pool import install_persistent_learning_pool
@@ -136,7 +136,7 @@ def render_floating_server_battery(
  const ROOT='ubike-battery-v29-upgrade';
  const BATTERY_URL='https://apis.youbike.com.tw/api/front/bike/lists';
  const FRESH_MS=30000, STALE_MS=300000, CONCURRENCY=8, REQUEST_TIMEOUT_MS=8500;
- const PREF_VERSION=5, LOCATION_WATCH_VERSION=2;
+ const PREF_VERSION=5, LOCATION_WATCH_VERSION=3;
  const runtime=win.__ubikeV29FastBattery||(win.__ubikeV29FastBattery={cache:new Map(),run:0});
  if(!(runtime.cache instanceof Map))runtime.cache=new Map();
  if(!runtime.locationState)runtime.locationState={lat:null,lon:null,accuracy:null,updatedAt:0,error:'',watchId:null,watchVersion:0};
@@ -302,8 +302,16 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
      },{enableHighAccuracy:true,maximumAge:15000,timeout:10000});
    }catch(e){runtime.locationState.error=String(e?.message||e||'定位啟動失敗');updateLocationUi();}
  }
+ function stopLocationWatch(){
+   try{
+     const geo=win.navigator&&win.navigator.geolocation?win.navigator.geolocation:(typeof navigator!=='undefined'?navigator.geolocation:null);
+     const existing=runtime.locationState.watchId;
+     if(geo&&existing!==null&&existing!==undefined)try{geo.clearWatch(existing);}catch(_){}
+     runtime.locationState.watchId=null;
+   }catch(_){}
+ }
  function open(){const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');fab.style.display='none';page.classList.add('open');page.setAttribute('aria-hidden','false');root._htmlOverflow=doc.documentElement.style.overflow;root._bodyOverflow=doc.body.style.overflow;doc.documentElement.style.overflow='hidden';doc.body.style.overflow='hidden';render();startLocationWatch();}
- function close(){const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');page.classList.remove('open');page.setAttribute('aria-hidden','true');fab.style.display='flex';doc.documentElement.style.overflow=root._htmlOverflow||'';doc.body.style.overflow=root._bodyOverflow||'';reverseStations.clear();}
+ function close(){const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');page.classList.remove('open');page.setAttribute('aria-hidden','true');fab.style.display='flex';doc.documentElement.style.overflow=root._htmlOverflow||'';doc.body.style.overflow=root._bodyOverflow||'';reverseStations.clear();stopLocationWatch();}
  function prefs(){try{return JSON.parse(localStorage.getItem('ubike-v29-fast-battery-pref')||'{}')||{};}catch(_){return {};}}
  function savePrefs(v){try{localStorage.setItem('ubike-v29-fast-battery-pref',JSON.stringify(v));}catch(_){}}
  function bindResultControls(root){const box=root.querySelector('#ub-results');if(!box)return;box.onclick=e=>{const btn=e.target.closest?.('.reverse-toggle');if(!btn)return;e.preventDefault();e.stopPropagation();let key='';try{key=decodeURIComponent(btn.getAttribute('data-reverse-key')||'');}catch(_){}if(!key)return;if(reverseStations.has(key))reverseStations.delete(key);else reverseStations.add(key);refreshViews();};}
@@ -324,13 +332,16 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
  function repairFloatingButton(){
    try{
      const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');
+     const unifiedButton=doc.querySelector('#ubike-float-tools .uft-battery');
+     doc.body?.classList.toggle('ubike-unified-float-stack',Boolean(unifiedButton));
      if(!page.classList.contains('open')){
        fab.style.display='flex';
        fab.style.visibility='visible';
        fab.style.opacity='1';
        fab.style.pointerEvents='auto';
        fab.hidden=false;
-       fab.removeAttribute('aria-hidden');
+       if(unifiedButton){fab.setAttribute('aria-hidden','true');fab.tabIndex=-1;}
+       else{fab.removeAttribute('aria-hidden');fab.tabIndex=0;}
      }
    }catch(_){}
  }
@@ -357,10 +368,17 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
  // Parent-window watchdog: survives Streamlit component iframe replacement/reruns.
  runtime.repairFloatingButton=repairFloatingButton;
  runtime.refreshViews=refreshViews;
+ const batteryUiNeedsRepair=()=>{
+   const root=doc.getElementById(ROOT);
+   const unified=Boolean(doc.querySelector('#ubike-float-tools .uft-battery'));
+   const classState=Boolean(doc.body?.classList.contains('ubike-unified-float-stack'));
+   return !root||!root.isConnected||!root.querySelector('#ub-v29-fab')||!root.querySelector('#ub-v29-page')||!root.querySelector('#ub-v29-main')||!doc.getElementById(ROOT+'-style')||unified!==classState;
+ };
  if(!runtime.safeUiInterval){
    runtime.safeUiInterval=win.setInterval(()=>{
+     if(!batteryUiNeedsRepair())return;
      try{runtime.repairFloatingButton?.();}catch(_){}
-   },750);
+   },1500);
  }
  if(runtime.safeUiObserver){
    try{runtime.safeUiObserver.disconnect();}catch(_){}
@@ -368,6 +386,7 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
  try{
    let repairTimer=null;
    runtime.safeUiObserver=new MutationObserver(()=>{
+     if(!batteryUiNeedsRepair())return;
      win.clearTimeout(repairTimer);
      repairTimer=win.setTimeout(()=>{
        try{runtime.repairFloatingButton?.();}catch(_){}
@@ -375,7 +394,7 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
    });
    runtime.safeUiObserver.observe(doc.documentElement,{childList:true,subtree:true});
  }catch(_){}
- ensure();render();repairFloatingButton();startLocationWatch();
+ stopLocationWatch();ensure();render();repairFloatingButton();
 })();
 </script></body></html>'''.replace('__ARGS__', payload)
-    components.html(html_text, height=0, scrolling=False)
+    st.iframe(html_text, height=0, tab_index=-1)
