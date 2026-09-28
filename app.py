@@ -1980,6 +1980,7 @@ replace_exact(
 def _modernize_legacy_iframes(legacy_source: str) -> str:
     """Use Streamlit's supported same-origin iframe API without changing legacy JS."""
     modern = legacy_source.replace("components.html(", "st.iframe(")
+    modern = modern.replace("height=0", "height=1")
     modern = modern.replace("scrolling=False,", "")
     modern = modern.replace(", scrolling=False", "")
     return modern
