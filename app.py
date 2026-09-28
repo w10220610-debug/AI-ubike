@@ -1480,10 +1480,10 @@ replace_exact(
                     },
                     ensure_ascii=False,
                 )
-                components.html(
+                st.iframe(
                     f"<script>window.parent.postMessage({event_payload}, '*');</script>",
                     height=0,
-                    scrolling=False,
+                    tab_index=-1,
                 )
             except Exception:
                 pass
