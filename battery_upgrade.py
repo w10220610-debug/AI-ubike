@@ -4,13 +4,8 @@ import json
 
 import streamlit as st
 
-import ai_learning_guard as _ai_learning_guard_module
-from persistent_learning_pool import install_persistent_learning_pool
 from station_service import StationServiceError, get_station_catalog, match_station
 from performance_cache import CatalogMapCache
-
-
-install_persistent_learning_pool(_ai_learning_guard_module)
 
 _resolved_station_maps = CatalogMapCache(max_entries=16)
 
