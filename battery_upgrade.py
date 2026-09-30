@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 
 import streamlit as st
 
 from station_service import StationServiceError, get_station_catalog, match_station
 from performance_cache import CatalogMapCache
+from background_refresh import station_map_refresh
 
 _resolved_station_maps = CatalogMapCache(max_entries=16)
 
@@ -104,6 +106,25 @@ def _build_resolved_station_map(clean_map, catalog) -> dict[str, list[dict]]:
     return resolved
 
 
+def _load_station_map(clean_map):
+    resolved, error = _resolve_station_numbers(clean_map)
+    if error:
+        raise StationServiceError(error)
+    return resolved
+
+
+@st.fragment(run_every=2)
+def _monitor_station_map(scope, clean_map, state_key):
+    state = station_map_refresh.poll(scope, lambda: _load_station_map(clean_map))
+    if state.pending and state.value is None:
+        st.caption("電池場站清單在背景準備中；主頁仍可操作。")
+    if state.error:
+        st.warning(f"電池場站清單未更新：{state.error}")
+    if state.revision != st.session_state.get(state_key):
+        st.session_state[state_key] = state.revision
+        st.rerun()
+
+
 def render_floating_server_battery(
     route_station_map: dict[str, list[dict]],
     mobile_mode: bool,
@@ -112,10 +133,19 @@ def render_floating_server_battery(
     priority_threshold: int = 69,
 ) -> None:
     """Reliable V29-old battery page with live location and district summary."""
-    resolved_map, catalog_error = _resolve_station_numbers(route_station_map)
+    clean_map = _clean_route_map(route_station_map)
+    scope = tuple((zone, tuple((item["name"], item["district"]) for item in items))
+                  for zone, items in sorted(clean_map.items()))
+    state_key = "background_battery_map::" + hashlib.sha256(repr(scope).encode()).hexdigest()
+    state = station_map_refresh.poll(scope, lambda: _load_station_map(clean_map))
+    resolved_map = state.value if state.value is not None else clean_map
+    catalog_error = state.error or ("場站清單正在準備，請稍後查詢。" if state.value is None else "")
+    st.session_state[state_key] = state.revision
+    _monitor_station_map(scope, clean_map, state_key)
     args = {
         "route_station_map": resolved_map,
         "catalog_error": catalog_error,
+        "catalog_pending": state.value is None,
         "threshold": max(0, min(100, int(threshold))),
         "priority_threshold": max(0, min(int(threshold), int(priority_threshold))),
         "mobile": bool(mobile_mode),
@@ -318,6 +348,7 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
  }
  function summarize(done,total,failed){const vals=Object.values(currentResults).filter(r=>r&&!r.error),lowStations=vals.filter(r=>num(r.low_count)>0).length,lowBikes=vals.reduce((s,r)=>s+num(r.low_count),0),urgent=vals.reduce((s,r)=>s+num(r.priority_count),0),root=ensure();root.querySelector('#ub-summary').innerHTML=`<span class="chip">完成 ${done}/${total}</span><span class="chip">需換場站 ${lowStations}</span><span class="chip">需換 ${lowBikes} 顆</span>${urgent?`<span class="chip hot">緊急 ${urgent} 顆</span>`:''}${failed?`<span class="chip hot">失敗 ${failed}</span>`:''}`;refreshViews();root.querySelector('#ub-progress').style.width=`${total?Math.round(done/total*100):0}%`;}
  async function runQuery(force){
+   if(args.catalog_pending){const status=ensure().querySelector('#ub-status');if(status)status.textContent=args.catalog_error||'場站清單正在準備，請稍後查詢。';return;}
    if(running)return;const root=ensure(),map=args.route_station_map||{},selected=[...root.querySelectorAll('[data-zone]:checked')].map(x=>x.value),status=root.querySelector('#ub-status');if(!selected.length){status.textContent='請至少選擇一個範圍';return;}
    const th=Math.max(0,Math.min(100,num(root.querySelector('#ub-th').value,89))),pr=Math.max(0,Math.min(th,num(root.querySelector('#ub-pr').value,69))),pe=root.querySelector('#ub-pe').checked;savePrefs({zones:selected,threshold:th,priority_threshold:pr,priority_enabled:pe,pref_version:PREF_VERSION});
    const specs=[],seen=new Set();for(const z of selected)for(const item of (map[z]||[])){if(!item?.name||seen.has(item.name))continue;seen.add(item.name);specs.push(item);}for(const key of Object.keys(currentResults))delete currentResults[key];running=true;runtime.run+=1;const runId=runtime.run;let index=0,done=0,failed=0;root.querySelectorAll('#ub-query,#ub-force').forEach(b=>b.disabled=true);status.textContent=`正在查詢 ${specs.length} 個場站…`;summarize(0,specs.length,0);

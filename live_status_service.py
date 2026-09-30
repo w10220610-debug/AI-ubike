@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -25,6 +25,7 @@ from config import (
     LIVE_STATUS_MISSING_RETRY_ROUNDS,
     LIVE_STATUS_REQUEST_TIMEOUT_SECONDS,
     LIVE_STATUS_STALE_TTL_SECONDS,
+    LIVE_STATUS_TOTAL_TIMEOUT_SECONDS,
     YOUBIKE_LIVE_STATUS_URL,
 )
 from station_service import match_station
@@ -112,6 +113,10 @@ def _build_logger() -> logging.Logger:
         handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(handler)
+    if isinstance(handler, RotatingFileHandler):
+        console = logging.StreamHandler()
+        console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(console)
     logger.propagate = False
     return logger
 
@@ -171,11 +176,14 @@ def _is_retryable_http_status(status: int) -> bool:
     return status in {408, 425, 429, 500, 502, 503, 504}
 
 
-def _request_batch(station_numbers: list[str]) -> tuple[list[dict], int, int]:
+def _request_batch(station_numbers: list[str], *, deadline: float | None = None) -> tuple[list[dict], int, int]:
     encoded_body = json.dumps({"station_no": station_numbers}).encode("utf-8")
     last_error: BaseException | None = None
     latency_ms = 0
     for attempt in range(1, LIVE_STATUS_MAX_ATTEMPTS + 1):
+        remaining = LIVE_STATUS_REQUEST_TIMEOUT_SECONDS if deadline is None else deadline - time.monotonic()
+        if remaining <= 0:
+            raise LiveStatusServiceError("即時車數整輪查詢已達時間上限。")
         started = time.perf_counter()
         request = Request(
             YOUBIKE_LIVE_STATUS_URL,
@@ -190,9 +198,16 @@ def _request_batch(station_numbers: list[str]) -> tuple[list[dict], int, int]:
             },
         )
         try:
-            with _api_semaphore:
-                with urlopen(request, timeout=LIVE_STATUS_REQUEST_TIMEOUT_SECONDS) as response:
+            if not _api_semaphore.acquire(timeout=remaining):
+                raise LiveStatusServiceError("即時車數請求等待已達時間上限。")
+            try:
+                remaining = LIVE_STATUS_REQUEST_TIMEOUT_SECONDS if deadline is None else deadline - time.monotonic()
+                if remaining <= 0:
+                    raise LiveStatusServiceError("即時車數整輪查詢已達時間上限。")
+                with urlopen(request, timeout=min(LIVE_STATUS_REQUEST_TIMEOUT_SECONDS, remaining)) as response:
                     payload = json.loads(response.read().decode("utf-8-sig"))
+            finally:
+                _api_semaphore.release()
             latency_ms = int((time.perf_counter() - started) * 1000)
             if isinstance(payload, dict) and payload.get("retCode") not in (None, 1, "1", True):
                 raise LiveStatusServiceError(str(payload.get("retMsg") or "官方資料服務回傳失敗"))
@@ -220,7 +235,10 @@ def _request_batch(station_numbers: list[str]) -> tuple[list[dict], int, int]:
 
         if attempt < LIVE_STATUS_MAX_ATTEMPTS:
             delay_index = min(attempt - 1, len(BATTERY_RETRY_BACKOFF_SECONDS) - 1)
-            time.sleep(BATTERY_RETRY_BACKOFF_SECONDS[delay_index])
+            delay = BATTERY_RETRY_BACKOFF_SECONDS[delay_index]
+            if deadline is not None:
+                delay = min(delay, max(0.0, deadline - time.monotonic()))
+            time.sleep(delay)
 
     raise LiveStatusServiceError(f"即時車數 API 查詢失敗：{last_error}")
 
@@ -240,16 +258,20 @@ def _fetch_parking_records(station_numbers: list[str]) -> tuple[dict[str, dict],
     total_latency_ms = 0
     last_errors: list[str] = []
     batch_round_count = 0
+    deadline = time.monotonic() + LIVE_STATUS_TOTAL_TIMEOUT_SECONDS
 
     for _round in range(max(1, LIVE_STATUS_MISSING_RETRY_ROUNDS)):
+        if time.monotonic() >= deadline:
+            break
         batches = _chunks(pending)
         if not batches:
             break
         batch_round_count += 1
         workers = max(1, min(LIVE_STATUS_MAX_CONCURRENCY, len(batches)))
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="live-status") as pool:
-            future_map = {pool.submit(_request_batch, batch): batch for batch in batches}
-            for future in as_completed(future_map):
+        pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="live-status")
+        future_map = {pool.submit(_request_batch, batch, deadline=deadline): batch for batch in batches}
+        try:
+            for future in as_completed(future_map, timeout=max(0.0, deadline - time.monotonic())):
                 request_count += 1
                 try:
                     items, latency_ms, _attempts = future.result()
@@ -263,6 +285,12 @@ def _fetch_parking_records(station_numbers: list[str]) -> tuple[dict[str, dict],
                 except LiveStatusServiceError as exc:
                     failed_request_count += 1
                     last_errors.append(str(exc))
+        except FuturesTimeoutError:
+            last_errors.append("即時車數整輪查詢已達時間上限，未取得的場站保留原有資料。")
+            failed_request_count += sum(not future.done() for future in future_map)
+        finally:
+            # Context-manager shutdown would wait for slow sockets and defeat the budget.
+            pool.shutdown(wait=False, cancel_futures=True)
         pending = [station_no for station_no in station_numbers if station_no not in found]
 
     if not found and last_errors:

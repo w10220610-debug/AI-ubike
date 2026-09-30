@@ -852,6 +852,9 @@ replace_exact(
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
 
+**2026/09/30｜運行修復**
+- 修復主頁等待即時車數與電池站號查詢而持續轉圈；細節見左側「BUG修復內容」。本次屬 BUG 修復，不累計功能升版次數。
+
 **2026/09/28｜移除 AI 學習系統**
 - 完整移除 AI 學習資料收集、自然／人工／疑似人工變化分類、人工調度紀錄面板、學習中預測欄位與遠端 Supabase 學習池。
 - 即時車數更新不再複製整份場站 DataFrame 給學習模組，也不再寫入／同步學習紀錄。
@@ -904,6 +907,12 @@ replace_exact(
 _BUG_FIX_CONTENT_MD = """
 #### 🐞 BUG 修復紀錄
 > 僅記錄已實際完成的修復；單純新增功能不列入。
+
+**2026/09/30｜主頁持續轉圈／即時車數與場站清單阻塞**
+- 主頁先呈現已有配置與現況；即時車數、電池場站清單改由受限背景工作處理，官方 API 連線不順不再拖住整頁。
+- 背景查詢等待上限 25 秒，逾時顯示原因並保留原有資料；同一範圍的查詢共用一個工作，避免重跑、定位更新或連按更新造成重複排隊。
+- 每 60 秒自動更新車數；狀態檢查只局部重跑，只有新資料完成後才重繪分析，不重新載入瀏覽器。
+- 查詢失敗不清空車數，電池站號尚未準備好時顯示提示，保留電量查詢按鈕與既有結果。
 
 **2026/09/28｜st.iframe 高度相容修復**
 - 修復全系統優化期間將舊的 0px 隱藏 component 直接遷移到 `st.iframe(height=0)`，被 Streamlit 1.59 判定為無效高度並拋出 `StreamlitInvalidHeightError` 的啟動錯誤。
@@ -1191,79 +1200,17 @@ replace_exact(
     'def normalize_browser_live_payload(payload) -> dict:',
     '''def get_youbike_browser_sync_component():
     """V29 compatibility: obtain live station data from the Python Server."""
-    from live_status_service import LiveStatusServiceError, get_live_status_for_stations
+    from live_status_ui import render_background_live_status
 
     def _server_sync_component(**_kwargs):
         stations = globals().get("_V29_SERVER_LIVE_STATIONS", [])
-        if not stations:
-            return {
-                "ok": False,
-                "event_id": uuid.uuid4().hex,
-                "error": "目前配置沒有可供同步的場站。",
-            }
-
-        force_refresh = bool(
-            st.session_state.pop("v29_server_live_force_refresh", False)
-        )
-
-        # Backward compatibility for an old bookmarked live_refresh URL.
-        refresh_token = ""
-        try:
-            refresh_token = str(st.query_params.get("live_refresh", "") or "").strip()
-        except Exception:
-            refresh_token = ""
+        force_refresh = bool(st.session_state.pop("v29_server_live_force_refresh", False))
+        refresh_token = str(st.query_params.get("live_refresh", "") or "").strip()
         refresh_state_key = "v29_server_live_refresh_token"
-        if (
-            refresh_token
-            and st.session_state.get(refresh_state_key) != refresh_token
-        ):
+        if refresh_token and st.session_state.get(refresh_state_key) != refresh_token:
             st.session_state[refresh_state_key] = refresh_token
             force_refresh = True
-
-        def _emit_sync_state(state: str, *, station_count: int = 0, message: str = "") -> None:
-            try:
-                event_payload = json.dumps(
-                    {
-                        "source": "ubike-browser-sync",
-                        "type": "ubike:sync-state",
-                        "state": state,
-                        "station_count": max(0, int(station_count or 0)),
-                        "message": str(message or ""),
-                    },
-                    ensure_ascii=False,
-                )
-                st.iframe(
-                    f"<script>window.parent.postMessage({event_payload}, '*');</script>",
-                    height=1,
-                    tab_index=-1,
-                )
-            except Exception:
-                pass
-
-        try:
-            result = get_live_status_for_stations(stations, force=force_refresh)
-            if force_refresh:
-                _emit_sync_state(
-                    "success",
-                    station_count=int(result.get("station_count") or 0),
-                )
-            return result
-        except LiveStatusServiceError as exc:
-            if force_refresh:
-                _emit_sync_state("error", message=str(exc))
-            return {
-                "ok": False,
-                "event_id": uuid.uuid4().hex,
-                "error": str(exc),
-            }
-        except Exception as exc:
-            if force_refresh:
-                _emit_sync_state("error", message=str(exc))
-            return {
-                "ok": False,
-                "event_id": uuid.uuid4().hex,
-                "error": f"Server 即時車數同步失敗：{exc}",
-            }
+        return render_background_live_status(stations, force=force_refresh)
 
     return _server_sync_component
 
