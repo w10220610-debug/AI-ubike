@@ -1169,6 +1169,8 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
       }).filter(item => item.station_id && item.station_name);
 
       if (!catalog.length) throw new Error("官網站點清單中找不到臺東候選場站");
+      // 與柱號查詢共用已驗證的臺東站號，避免手機再下載全臺目錄。
+      window.parent.__ubikeStationCatalog = catalog;
 
       const requestedStationIds = [...new Set(catalog.map(item => item.station_id))];
       const requestedStationIdSet = new Set(requestedStationIds);
@@ -4575,7 +4577,7 @@ _DISPATCH_GEOLOCATION_COMPONENT = None
 
 LOW_BATTERY_CLIENT_CORE_JS = r"""
       function ensureUbikeBatteryService(win) {
-        const serviceVersion = "v27.5.1";
+        const serviceVersion = "v27.5.2";
         const existing = win.__ubikeBatteryService;
         if (existing && existing.version === serviceVersion) return existing;
 
@@ -4637,23 +4639,40 @@ LOW_BATTERY_CLIENT_CORE_JS = r"""
           if (partial.length > 1 && partial[1].score >= partial[0].score - .02) return null;
           return partial[0].item;
         }
-        async function fetchJson(url, { attempts = 2, timeoutMs = 14000 } = {}) {
+        async function fetchJson(
+          url, { attempts = 2, timeoutMs = 8000, totalTimeoutMs = 18000 } = {},
+        ) {
           let lastError = null;
+          const deadline = Date.now() + Math.max(1, totalTimeoutMs);
           for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
+            const remainingMs = deadline - Date.now();
+            if (remainingMs <= 0) throw lastError || new Error("電池資料查詢逾時");
             const controller = new win.AbortController();
-            const timeout = win.setTimeout(() => controller.abort(), timeoutMs);
+            let timeout;
             try {
-              const response = await win.fetch(url, {
-                cache: "no-store",
-                credentials: "omit",
-                signal: controller.signal,
+              const request = (async () => {
+                const response = await win.fetch(url, {
+                  cache: "no-store",
+                  credentials: "omit",
+                  signal: controller.signal,
+                });
+                if (!response.ok) {
+                  const error = new Error(`HTTP ${response.status}`);
+                  error.retryable = [408, 425, 429, 500, 502, 503, 504].includes(response.status);
+                  throw error;
+                }
+                return await response.json();
+              })();
+              const timedOut = new Promise((_, reject) => {
+                timeout = win.setTimeout(() => {
+                  const error = new Error("電池資料查詢逾時");
+                  error.name = "TimeoutError";
+                  error.retryable = true;
+                  reject(error);
+                  controller.abort();
+                }, Math.min(timeoutMs, remainingMs));
               });
-              if (!response.ok) {
-                const error = new Error(`HTTP ${response.status}`);
-                error.retryable = [408, 425, 429, 500, 502, 503, 504].includes(response.status);
-                throw error;
-              }
-              return await response.json();
+              return await Promise.race([request, timedOut]);
             } catch (error) {
               lastError = error;
               const networkFailure = error?.name === "AbortError"
@@ -4662,17 +4681,21 @@ LOW_BATTERY_CLIENT_CORE_JS = r"""
                   String(error?.message || error),
                 );
               if (attempt >= attempts || (!networkFailure && error?.retryable !== true)) throw error;
-              await wait(320 * attempt + Math.floor(Math.random() * 260));
+              const retryDelay = 320 * attempt + Math.floor(Math.random() * 260);
+              if (Date.now() + retryDelay >= deadline) throw error;
+              await wait(retryDelay);
             } finally {
               win.clearTimeout(timeout);
             }
           }
           throw lastError || new Error("網路連線失敗");
         }
-        async function getCatalog({ force = false, attempts = 2, timeoutMs = 15000 } = {}) {
+        async function getCatalog({ force = false, attempts = 2, timeoutMs = 8000, totalTimeoutMs = 18000 } = {}) {
           if (catalogCache && !force) return catalogCache;
-          if (catalogPromise && !force) return catalogPromise;
-          catalogPromise = fetchJson(catalogUrl, { attempts, timeoutMs })
+          const sharedCatalog = win.__ubikeStationCatalog;
+          if (!force && Array.isArray(sharedCatalog) && sharedCatalog.length) return sharedCatalog;
+          if (catalogPromise) return catalogPromise;
+          catalogPromise = fetchJson(catalogUrl, { attempts, timeoutMs, totalTimeoutMs })
             .then(payload => {
               const catalog = extractItems(payload).filter(isTaitungStation);
               if (!catalog.length) throw new Error("找不到臺東場站清單");
@@ -4687,7 +4710,9 @@ LOW_BATTERY_CLIENT_CORE_JS = r"""
         function normalizeBatteryRecords(payload) {
           const records = Array.isArray(payload?.retVal) ? payload.retVal : extractItems(payload);
           return records.map(record => {
-            const batteryPower = Number(record.battery_power);
+            const rawPower = record.battery_power;
+            const batteryPower = rawPower === null || rawPower === undefined
+              || String(rawPower).trim() === "" ? NaN : Number(rawPower);
             return {
               bike_no: String(record.bike_no || "").trim(),
               pillar_no: String(record.pillar_no || "").trim(),
@@ -4699,22 +4724,22 @@ LOW_BATTERY_CLIENT_CORE_JS = r"""
         }
         async function getBatteryListByStationNo(
           stationNo,
-          { force = false, ttlMs = 45000, attempts = 2, timeoutMs = 14000 } = {},
+          { force = false, ttlMs = 45000, attempts = 2, timeoutMs = 8000, totalTimeoutMs = 18000 } = {},
         ) {
           const key = String(stationNo || "").trim();
           if (!key) throw new Error("場站編號不存在");
+          // 已啟動重查時，新畫面要接最新結果，不能先拿舊快取停止等待。
+          if (batteryInflight.has(key)) return batteryInflight.get(key);
           const cached = batteryCache.get(key);
           if (!force && cached && Date.now() - cached.fetchedAt <= ttlMs) return cached.bikes;
-          if (batteryInflight.has(key)) {
-            try {
-              const inflightResult = await batteryInflight.get(key);
-              if (!force) return inflightResult;
-            } catch (_) {}
-          }
+          // 重查略過已完成快取，但共用正在取得的最新資料。
           const promise = fetchJson(
             `${batteryUrl}?station_no=${encodeURIComponent(key)}`,
-            { attempts, timeoutMs },
+            { attempts, timeoutMs, totalTimeoutMs },
           ).then(payload => {
+            if (String(payload?.retCode) !== "1" || !Array.isArray(payload?.retVal)) {
+              throw new Error("官方電池資料回傳異常");
+            }
             const bikes = normalizeBatteryRecords(payload);
             batteryCache.set(key, { fetchedAt: Date.now(), bikes });
             return bikes;
@@ -4725,23 +4750,39 @@ LOW_BATTERY_CLIENT_CORE_JS = r"""
           return promise;
         }
         async function queryStationByName(stationName, options = {}) {
-          const catalog = await getCatalog({
-            attempts: options.attempts,
-            timeoutMs: options.timeoutMs,
-          });
-          const matched = matchCatalogStation(stationName, catalog);
-          if (!matched) throw new Error("官方清單找不到此場站");
-          const stationNo = String(
-            matched.station_no || matched.sno || matched.station_id || "",
-          ).trim();
+          const deadline = Date.now() + (options.totalTimeoutMs ?? 18000);
+          let stationNo = String(options.stationNo || "").trim();
+          if (!stationNo) {
+            // 重查只更新電池資料；名稱與站號目錄仍可共用。
+            const catalog = await getCatalog({ ...options, force: false });
+            const matched = matchCatalogStation(stationName, catalog);
+            if (!matched) throw new Error("官方清單找不到此場站");
+            stationNo = String(matched.station_no || matched.sno || matched.station_id || "").trim();
+          }
           if (!stationNo) throw new Error("官方場站缺少站號");
-          const bikes = await getBatteryListByStationNo(stationNo, options);
+          const remainingMs = deadline - Date.now();
+          if (remainingMs <= 0) throw new Error("電池資料查詢逾時");
+          const bikes = await getBatteryListByStationNo(stationNo, {
+            ...options, totalTimeoutMs: remainingMs,
+          });
           return {
             matched: true,
             stationNo,
             stationName: String(stationName || "").trim(),
             bikes,
           };
+        }
+        function getCachedStationResult(stationName, { stationNo = "", ttlMs = 30000 } = {}) {
+          if (!stationNo) {
+            const catalog = catalogCache || win.__ubikeStationCatalog || [];
+            const matched = matchCatalogStation(stationName, catalog);
+            stationNo = String(matched?.station_no || matched?.sno || matched?.station_id || "").trim();
+          }
+          const key = String(stationNo).trim();
+          if (batteryInflight.has(key)) return null;
+          const cached = batteryCache.get(key);
+          if (!cached || Date.now() - cached.fetchedAt > ttlMs) return null;
+          return { matched: true, stationNo, stationName, bikes: cached.bikes };
         }
 
         const service = {
@@ -4751,6 +4792,7 @@ LOW_BATTERY_CLIENT_CORE_JS = r"""
           matchCatalogStation,
           getBatteryListByStationNo,
           queryStationByName,
+          getCachedStationResult,
           clearBatteryCache() { batteryCache.clear(); },
         };
         win.__ubikeBatteryService = service;
@@ -4770,7 +4812,7 @@ LOW_BATTERY_CLIENT_CORE_JS = r"""
 
 @st.cache_data(show_spinner=False, max_entries=192)
 def _build_inline_low_battery_pillars_html(
-    station_specs: tuple[tuple[str, str, str], ...],
+    station_specs: tuple[tuple[str, str, str, str], ...],
     threshold: int,
     priority_threshold: int,
     mobile_mode: bool,
@@ -4780,8 +4822,8 @@ def _build_inline_low_battery_pillars_html(
 ) -> str:
     """建立主頁柱號查詢元件；智慧調度自動查，一般分析按站查。"""
     specs = [
-        {"name": name, "kind": kind, "target": target}
-        for name, kind, target in station_specs
+        {"name": name, "kind": kind, "target": target, "stationNo": station_no}
+        for name, kind, target, station_no in station_specs
         if str(name).strip()
     ]
     specs_payload = json.dumps(specs, ensure_ascii=False).replace("</", "<\\/")
@@ -4857,6 +4899,11 @@ def _build_inline_low_battery_pillars_html(
       doc.head.appendChild(style);
 
       const wrappersByName = new Map();
+      const stationStates = new Map();
+      const queryInflight = new Map();
+      const stationNumbers = new Map(specs.map(
+        spec => [service.normalizeStationName(spec.name), String(spec.stationNo || "").trim()],
+      ));
       const normalizedSpecNames = new Set(specs.map(spec => service.normalizeStationName(spec.name)));
       function targetForSpec(spec) {
         if (spec.kind === "analysis") return doc.getElementById(spec.target);
@@ -4893,8 +4940,14 @@ def _build_inline_low_battery_pillars_html(
         const normalized = service.normalizeStationName(stationName);
         if (!wrappersByName.has(normalized)) wrappersByName.set(normalized, []);
         wrappersByName.get(normalized).push(wrapper);
+        // 元件可能比 Streamlit 卡片先完成查詢；稍後出現的卡片也要取得結果。
+        const state = stationStates.get(normalized);
+        if (state?.status === "ready") renderResult(stationName, state.result);
+        else if (state?.status === "error") renderError(stationName);
+        else if (state?.status === "loading") setLoading(stationName);
       }
       function attachTargets() {
+        if (win.__ubikeInlineBatteryGeneration !== generation) return;
         for (const spec of specs) {
           const target = targetForSpec(spec);
           if (!target) continue;
@@ -4913,6 +4966,7 @@ def _build_inline_low_battery_pillars_html(
         return wrappersByName.get(service.normalizeStationName(stationName)) || [];
       }
       function setLoading(stationName) {
+        stationStates.set(service.normalizeStationName(stationName), { status: "loading" });
         for (const wrapper of wrappersFor(stationName)) {
           wrapper.classList.remove("is-error", "is-empty");
           wrapper.replaceChildren();
@@ -4930,6 +4984,7 @@ def _build_inline_low_battery_pillars_html(
       }
       function renderResult(stationName, result) {
         if (win.__ubikeInlineBatteryGeneration !== generation) return;
+        stationStates.set(service.normalizeStationName(stationName), { status: "ready", result });
         const pillarMap = new Map();
         for (const bike of Array.isArray(result?.bikes) ? result.bikes : []) {
           if (!Number.isFinite(Number(bike.battery_power)) || Number(bike.battery_power) > threshold) continue;
@@ -4983,12 +5038,13 @@ def _build_inline_low_battery_pillars_html(
       }
       function renderError(stationName) {
         if (win.__ubikeInlineBatteryGeneration !== generation) return;
+        stationStates.set(service.normalizeStationName(stationName), { status: "error" });
         for (const wrapper of wrappersFor(stationName)) {
           wrapper.replaceChildren();
           wrapper.classList.remove("is-empty");
           wrapper.classList.add("is-error");
           const label = doc.createElement("span");
-          label.textContent = "電池資料查詢失敗";
+          label.textContent = "柱號暫未取得，請重新查詢";
           wrapper.appendChild(label);
           const retry = doc.createElement("button");
           retry.type = "button";
@@ -5003,20 +5059,44 @@ def _build_inline_low_battery_pillars_html(
       }
       async function queryStation(stationName, force = false) {
         if (win.__ubikeInlineBatteryGeneration !== generation) return;
-        setLoading(stationName);
-        try {
-          const result = await service.queryStationByName(stationName, {
-            force,
-            ttlMs: 30000,
-            attempts: requestIsMobile ? 3 : 2,
-            timeoutMs: requestIsMobile ? 15000 : 12000,
-          });
-          renderResult(stationName, result);
-        } catch (_) {
-          renderError(stationName);
+        const key = service.normalizeStationName(stationName);
+        if (queryInflight.has(key)) return queryInflight.get(key);
+        const stationNo = stationNumbers.get(key) || "";
+        const cached = !force && service.getCachedStationResult(stationName, { stationNo, ttlMs: 30000 });
+        if (cached) {
+          renderResult(stationName, cached);
+          return;
         }
+        setLoading(stationName);
+        const promise = (async () => {
+          let timeout;
+          try {
+            const result = await Promise.race([
+              service.queryStationByName(stationName, {
+                stationNo,
+                force,
+                ttlMs: 30000,
+                attempts: 2,
+                timeoutMs: 6500,
+                totalTimeoutMs: 14000,
+              }),
+              new Promise((_, reject) => {
+                timeout = win.setTimeout(() => reject(new Error("柱號查詢逾時")), 14000);
+              }),
+            ]);
+            renderResult(stationName, result);
+          } catch (_) {
+            renderError(stationName);
+          } finally {
+            win.clearTimeout(timeout);
+            queryInflight.delete(key);
+          }
+        })();
+        queryInflight.set(key, promise);
+        return promise;
       }
       async function runAutomaticQueries() {
+        if (win.__ubikeInlineBatteryGeneration !== generation) return;
         const uniqueStations = [];
         const seen = new Set();
         for (const spec of specs) {
@@ -5032,6 +5112,7 @@ def _build_inline_low_battery_pillars_html(
         );
         async function worker() {
           while (nextIndex < uniqueStations.length) {
+            if (win.__ubikeInlineBatteryGeneration !== generation) return;
             const stationName = uniqueStations[nextIndex++];
             const force = service.normalizeStationName(stationName)
               === service.normalizeStationName(forceStation);
@@ -5047,7 +5128,8 @@ def _build_inline_low_battery_pillars_html(
       attachTargets();
       win.setTimeout(attachTargets, 120);
       win.setTimeout(attachTargets, 420);
-      if (autoQuery && specs.length) win.setTimeout(runAutomaticQueries, 480);
+      win.setTimeout(attachTargets, 1200);
+      if (autoQuery && specs.length) runAutomaticQueries();
     })();
     </script>
     """
@@ -5065,7 +5147,7 @@ def _build_inline_low_battery_pillars_html(
 
 
 def render_inline_low_battery_pillars(
-    station_specs: list[tuple[str, str, str]],
+    station_specs: list[tuple[str, str, str] | tuple[str, str, str, str]],
     *,
     threshold: int,
     priority_threshold: int,
@@ -5075,9 +5157,9 @@ def render_inline_low_battery_pillars(
 ) -> None:
     """把柱號結果安全注入既有分析列或智慧推薦卡，不改原本卡片格局。"""
     normalized_specs = tuple(
-        (str(name), str(kind), str(target))
-        for name, kind, target in station_specs
-        if str(name).strip()
+        (str(spec[0]), str(spec[1]), str(spec[2]), str(spec[3]) if len(spec) > 3 else "")
+        for spec in station_specs
+        if str(spec[0]).strip()
     )
     if not normalized_specs:
         return
@@ -5114,12 +5196,12 @@ def _build_floating_battery_query_html(
       __LOW_BATTERY_CLIENT_CORE__
       const routeStations = __ROUTE_STATIONS__;
       const displayMode = __DISPLAY_MODE__;
-      const fingerprint = __BATTERY_FINGERPRINT__ + "-panel-v2";
       const doc = window.parent.document;
       const win = window.parent;
       const catalogUrl = "https://apis.youbike.com.tw/json/station-min-yb2.json";
       const batteryUrl = "https://apis.youbike.com.tw/api/front/bike/lists";
       const batteryService = ensureUbikeBatteryService(win);
+      const fingerprint = __BATTERY_FINGERPRINT__ + "-panel-v2-" + batteryService.version;
       function updateBatteryFabPosition() {
         const existingFab = doc.getElementById("ubike-battery-fab");
         // 桌面模式交由既有 CSS media query 隨視窗寬度調整，避免行動版 inline 值卡住。
@@ -6076,11 +6158,11 @@ def _build_floating_battery_query_html(
       }
       function matchCatalogStation(stationName, catalog) {
         const wantedKey = normalizeStationName(stationName);
-        const exact = catalog.filter(item => normalizeStationName(item.name_tw || item.sna) === wantedKey);
+        const exact = catalog.filter(item => normalizeStationName(item.name_tw || item.sna || item.station_name) === wantedKey);
         if (exact.length === 1) return exact[0];
         const partial = catalog
           .map(item => {
-            const candidateKey = normalizeStationName(item.name_tw || item.sna);
+            const candidateKey = normalizeStationName(item.name_tw || item.sna || item.station_name);
             const matches = wantedKey.length >= 4 && candidateKey.length >= 4
               && (wantedKey.includes(candidateKey) || candidateKey.includes(wantedKey));
             const score = matches ? Math.min(wantedKey.length, candidateKey.length) / Math.max(wantedKey.length, candidateKey.length) : 0;
@@ -9139,7 +9221,7 @@ def render_smart_dispatch(
         render_dispatch_plan_card(active_trip, title="已同意前往／目的地已鎖定")
         active_station_name = str(active_trip.get("station_name") or "").strip()
         render_inline_low_battery_pillars(
-            [(active_station_name, "plan", "")],
+            [(active_station_name, "plan", "", str(active_trip.get("station_id") or ""))],
             threshold=battery_threshold,
             priority_threshold=battery_priority_threshold,
             mobile_mode=battery_mobile_mode,
@@ -9633,8 +9715,8 @@ def render_smart_dispatch(
         )
 
         candidate_key_scope = hashlib.sha1(dispatch_prefix.encode("utf-8")).hexdigest()[:10]
-        candidate_battery_specs: list[tuple[str, str, str]] = [
-            (str(recommended["station_name"]), "plan", "")
+        candidate_battery_specs: list[tuple[str, str, str, str]] = [
+            (str(recommended["station_name"]), "plan", "", str(recommended.get("station_id") or ""))
         ]
         for rank, candidate in enumerate(visible_candidates, start=1):
             station_name = str(candidate["station_name"])
@@ -9666,7 +9748,7 @@ def render_smart_dispatch(
                 f"{normalize_station_key(station_name)}"
             )
             candidate_battery_specs.append(
-                (station_name, "candidate", f"st-key-{candidate_widget_key}")
+                (station_name, "candidate", f"st-key-{candidate_widget_key}", str(candidate.get("station_id") or ""))
             )
             candidate_clicked = st.button(
                 card_label,

@@ -175,7 +175,7 @@ test('GPS errors are reported and automatic retries still run', async () => {
 
 // A minimal DOM exercises the complete embedded battery script. It models the
 // controls and owned nodes rather than requiring a browser or making API calls.
-function batteryHarness() {
+function batteryHarness({ fetchImpl, sharedCatalog } = {}) {
   let created = 0;
   const listeners = new Map();
   const storage = new Map([['ubike-battery-query-preferences-v7', JSON.stringify({ sort_mode: 'district' })]]);
@@ -256,7 +256,8 @@ function batteryHarness() {
       listeners.get(type).add(fn);
     },
     removeEventListener(type, fn) { listeners.get(type)?.delete(fn); },
-    fetch() { throw new Error('This UI test must not request network data'); },
+    fetch: fetchImpl || (() => { throw new Error('This UI test must not request network data'); }),
+    __ubikeStationCatalog: sharedCatalog,
   };
   const context = vm.createContext({ window: { parent: win }, navigator: {}, Date, Intl, AbortController });
   function render({ fingerprint = 'configured-routes', mode = 'desktop', routes = { D1: [{ name: '臺東縣政府', district: '臺東市' }] } } = {}) {
@@ -342,7 +343,7 @@ test('battery panel schema marker upgrades a panel with a legacy fingerprint', (
   app.win.__ubikeBatteryFingerprint = 'configured-routes';
   app.render();
   assert.notEqual(app.doc.getElementById('ubike-battery-page'), oldPage);
-  assert.equal(app.win.__ubikeBatteryFingerprint, 'configured-routes-panel-v2');
+  assert.equal(app.win.__ubikeBatteryFingerprint, 'configured-routes-panel-v2-v27.5.2');
   assert.equal(app.keyListenerCount(), 1);
 });
 
@@ -356,4 +357,25 @@ test('battery FAB keeps responsive CSS available on reuse and honours explicit m
   assert.equal(fab.style.bottom, '', 'desktop viewport sizes must remain governed by the responsive CSS');
   app.render({ fingerprint: 'mobile-routes', mode: 'mobile' });
   assert.equal(app.doc.getElementById('ubike-battery-fab').style.bottom, 'calc(312px + env(safe-area-inset-bottom, 0px))');
+});
+
+test('floating battery queries keep matching stations from the shared synchronization catalogue', async () => {
+  const requests = [];
+  const app = batteryHarness({
+    sharedCatalog: [{ station_id: 'fixture-001', station_name: '臺東縣政府', latitude: 22.75, longitude: 121.14 }],
+    fetchImpl: async url => {
+      requests.push(url);
+      return { ok: true, json: async () => ({ retCode: 1, retVal: [
+        { bike_no: 'E1', pillar_no: '7', battery_power: 20 },
+      ] }) };
+    },
+  });
+  app.render();
+  const page = app.doc.getElementById('ubike-battery-page');
+  page.querySelector('.battery-scope-list').children[0].children[0].checked = true;
+  await page.querySelector('.battery-refresh').click();
+  assert.equal(requests.length, 1, 'shared catalogue must avoid a second catalogue request');
+  assert.match(requests[0], /station_no=fixture-001/);
+  assert.match(page.querySelector('.battery-status').textContent, /1 個場站完成/);
+  assert.doesNotMatch(page.querySelector('.battery-status').textContent, /未配對|失敗/);
 });

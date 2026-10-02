@@ -5,6 +5,7 @@ Requires the app's Streamlit and openpyxl dependencies; makes no network calls.
 """
 import hashlib
 import json
+import re
 import sys
 import time
 import unittest
@@ -65,6 +66,17 @@ class ManualDispatchTests(unittest.TestCase):
         self.factory_patch = patch.object(components, "declare_component", side_effect=factory)
         self.factory_patch.start()
         self.addCleanup(self.factory_patch.stop)
+        self.inline_html = []
+        original_html = components.html
+
+        def capture_html(html, **options):
+            if "const specs = " in html and "__ubikeInlineBatteryGeneration" in html:
+                self.inline_html.append(html)
+            return original_html(html, **options)
+
+        self.html_patch = patch.object(components, "html", side_effect=capture_html)
+        self.html_patch.start()
+        self.addCleanup(self.html_patch.stop)
         self.network_patch = patch("urllib.request.urlopen", side_effect=self.road_response)
         self.network_patch.start()
         self.addCleanup(self.network_patch.stop)
@@ -121,6 +133,18 @@ class ManualDispatchTests(unittest.TestCase):
         self.assertEqual(self.state_value("::history")[-1]["action"], "completed")
         self.assertEqual(self.state_value("::truck_bike"), 2)
         self.assertEqual(self.saved_station(trip["station_name"])["2.0 現況"], 6)
+
+    def test_inline_pillars_receive_official_ids_before_and_after_accepting(self):
+        specs = json.loads(re.search(r"const specs = (.*);", self.inline_html[-1])[1])
+        expected_ids = {record["station_name"]: record["station_id"] for record in self.records}
+        self.assertTrue(specs)
+        for spec in specs:
+            self.assertEqual(spec["stationNo"], expected_ids[spec["name"]])
+        self.press("✅ 前往此站")
+        trip = self.state_value("::active_trip")
+        specs = json.loads(re.search(r"const specs = (.*);", self.inline_html[-1])[1])
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0]["stationNo"], expected_ids[trip["station_name"]])
 
     def test_cancel_keeps_station_and_truck_counts(self):
         self.press("✅ 前往此站")
