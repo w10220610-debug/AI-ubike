@@ -949,16 +949,19 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
   let args = {};
   let busy = false;
   let autoTimer = null;
+  let initializedScope = null;
+  let pendingInitialSync = false;
+  let lastSyncFailed = false;
   const SIGNATURE_STORAGE_KEY = "ubike-live-count-signature-v1";
   const UNCHANGED_HEARTBEAT_MS = 5 * 60 * 1000;
 
-  function signatureStorageKey() {
-    return `${SIGNATURE_STORAGE_KEY}:${String(args.signature_scope || "default")}`;
+  function signatureStorageKey(scope = String(args.signature_scope || "default")) {
+    return `${SIGNATURE_STORAGE_KEY}:${scope}`;
   }
 
-  function readDeliveredState() {
+  function readDeliveredState(scope) {
     try {
-      const parsed = JSON.parse(window.sessionStorage.getItem(signatureStorageKey()) || "{}");
+      const parsed = JSON.parse(window.sessionStorage.getItem(signatureStorageKey(scope)) || "{}");
       return {
         signature: String(parsed.signature || ""),
         deliveredAt: Number(parsed.deliveredAt || 0),
@@ -968,10 +971,10 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
     }
   }
 
-  function writeDeliveredState(signature, deliveredAt) {
+  function writeDeliveredState(signature, deliveredAt, scope) {
     try {
       window.sessionStorage.setItem(
-        signatureStorageKey(),
+        signatureStorageKey(scope),
         JSON.stringify({ signature, deliveredAt })
       );
     } catch (_) {}
@@ -1056,12 +1059,20 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
           throw error;
         }
         const responseText = await response.text();
-        try { return JSON.parse(responseText); }
+        let payload;
+        try { payload = JSON.parse(responseText); }
         catch (_) { throw new Error("官網回傳的內容不是 JSON"); }
+        if (payload && typeof payload === "object" && payload.retCode != null
+            && ![1, "1", true].includes(payload.retCode)) {
+          const error = new Error(`官網資料服務錯誤：${String(payload.retMsg || "官方資料服務回傳失敗")}`);
+          error.retryable = false;
+          throw error;
+        }
+        return payload;
       } catch (error) {
         lastError = error;
         const status = Number(error && error.status);
-        const retryable = error && (
+        const retryable = error && error.retryable !== false && (
           error.name === "AbortError" || status === 429 || status >= 500 || !Number.isFinite(status)
         );
         if (!retryable || attempt >= maxAttempts) throw error;
@@ -1090,16 +1101,17 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
   }
 
   function scheduleAutoSync() {
-    if (autoTimer !== null) {
-      clearTimeout(autoTimer);
+    if (!args.auto_refresh) {
+      if (autoTimer !== null) clearTimeout(autoTimer);
       autoTimer = null;
+      return;
     }
-    if (!args.auto_refresh) return;
+    // 一般重算保留既有倒數，避免每次操作都把同步延後一分鐘。
+    if (busy || autoTimer !== null) return;
     const seconds = Math.max(5, Math.min(60, Number(args.auto_refresh_seconds || 60)));
     autoTimer = setTimeout(() => {
       autoTimer = null;
-      if (busy) scheduleAutoSync();
-      else runSync();
+      if (!busy) runSync();
     }, seconds * 1000);
   }
 
@@ -1110,6 +1122,8 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
       autoTimer = null;
     }
     busy = true;
+    const syncArgs = args;
+    const syncScope = String(syncArgs.signature_scope || "default");
     const startedAt = performance.now();
     sendHostSyncState("busy");
     button.disabled = true;
@@ -1117,13 +1131,13 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
     setStatus("將以最大批次、有限並行及只補漏站的方式取得資料，不經 TDX。", false);
 
     try {
-      const catalogUrl = args.catalog_url || "https://apis.youbike.com.tw/json/station-min-yb2.json";
-      const parkingUrl = args.parking_url || "https://apis.youbike.com.tw/tw2/parkingInfo";
-      const batchSize = Math.max(1, Math.min(50, Number(args.batch_size || 20)));
-      const concurrency = Math.max(1, Math.min(6, Number(args.request_concurrency || 4)));
-      const maxBatchRounds = Math.max(1, Math.min(8, Number(args.max_batch_rounds || 4)));
-      const maxSingleRounds = Math.max(0, Math.min(4, Number(args.max_single_rounds || 2)));
-      const waveDelayMs = Math.max(0, Math.min(1000, Number(args.wave_delay_ms || 70)));
+      const catalogUrl = syncArgs.catalog_url || "https://apis.youbike.com.tw/json/station-min-yb2.json";
+      const parkingUrl = syncArgs.parking_url || "https://apis.youbike.com.tw/tw2/parkingInfo";
+      const batchSize = Math.max(1, Math.min(50, Number(syncArgs.batch_size || 20)));
+      const concurrency = Math.max(1, Math.min(6, Number(syncArgs.request_concurrency || 4)));
+      const maxBatchRounds = Math.max(1, Math.min(8, Number(syncArgs.max_batch_rounds || 4)));
+      const maxSingleRounds = Math.max(0, Math.min(4, Number(syncArgs.max_single_rounds || 2)));
+      const waveDelayMs = Math.max(0, Math.min(1000, Number(syncArgs.wave_delay_ms || 70)));
 
       const catalogPayload = await fetchJson(catalogUrl, {
         method: "GET",
@@ -1150,6 +1164,7 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
       const parkingMap = new Map();
       let requestCount = 0;
       let failedRequestCount = 0;
+      let lastRequestError = "";
       let batchRoundCount = 0;
       let singleRoundCount = 0;
 
@@ -1203,7 +1218,8 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
               addedCount += mergeParkingItems(items);
             } catch (error) {
               failedRequestCount += 1;
-              failedGroups.push({ stationIds, error: String(error && error.message ? error.message : error) });
+              lastRequestError = String(error && error.message ? error.message : error);
+              failedGroups.push({ stationIds, error: lastRequestError });
             } finally {
               completedCount += 1;
               const missingCount = currentMissingIds().length;
@@ -1283,8 +1299,11 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
         });
       }
 
-      if (!records.length) throw new Error("官網沒有回傳臺東場站即時車數");
+      if (!records.length) {
+        throw new Error("官網沒有回傳臺東場站即時車數" + (lastRequestError ? `：${lastRequestError}` : ""));
+      }
       missingStationIds = currentMissingIds();
+      if (syncScope !== String(args.signature_scope || "default")) return;
 
       // 每次仍照常向官網取得資料；只有車數／營運狀態／漏站清單真的變動時，
       // 才把值送回 Streamlit 觸發整頁重算。資料完全相同時最多五分鐘送一次心跳。
@@ -1298,11 +1317,12 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
           record.service_status ?? "",
         ].join(":"))
         .join("|") + `|missing:${missingStationIds.join(",")}`;
-      const deliveredState = readDeliveredState();
+      const deliveredState = readDeliveredState(syncScope);
       const nowMilliseconds = Date.now();
       const shouldDeliver = (
         forceDelivery
-        || Boolean(args.force_initial_delivery)
+        || lastSyncFailed
+        || Boolean(syncArgs.force_initial_delivery)
         || signature !== deliveredState.signature
         || nowMilliseconds - deliveredState.deliveredAt >= UNCHANGED_HEARTBEAT_MS
       );
@@ -1328,7 +1348,7 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
           elapsed_ms: Math.max(0, Math.round(performance.now() - startedAt)),
           source: "YouBike 官網公開接口（高速循環補查，由使用者瀏覽器直接取得，免 TDX）",
         });
-        writeDeliveredState(signature, nowMilliseconds);
+        writeDeliveredState(signature, nowMilliseconds, syncScope);
       }
 
       const missingText = missingStationIds.length ? `，仍缺 ${missingStationIds.length} 個` : "，已全數取得";
@@ -1339,8 +1359,11 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
         `已取得 ${records.length}／${requestedStationIds.length} 個場站${missingText}，共送出 ${requestCount} 次請求${deliveryText}`,
         false,
       );
+      lastSyncFailed = false;
       sendHostSyncState("success", { station_count: records.length, changed: shouldDeliver });
     } catch (error) {
+      if (syncScope !== String(args.signature_scope || "default")) return;
+      lastSyncFailed = true;
       const message = error && error.name === "AbortError"
         ? "連線逾時，請檢查手機網路後再試"
         : String(error && error.message ? error.message : error);
@@ -1352,7 +1375,12 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
       button.disabled = false;
       button.textContent = args.button_label || "🔄 由手機／瀏覽器取得 YouBike 即時車數";
       setHeight();
-      scheduleAutoSync();
+      if (pendingInitialSync) {
+        pendingInitialSync = false;
+        runSync({ forceDelivery: true });
+      } else {
+        scheduleAutoSync();
+      }
     }
   }
 
@@ -1365,9 +1393,21 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
     }
     if (event.data.type !== "streamlit:render") return;
     args = event.data.args || {};
+    const nextScope = String(args.signature_scope || "default");
+    if (initializedScope !== nextScope) {
+      initializedScope = nextScope;
+      pendingInitialSync = true;
+      if (autoTimer !== null) clearTimeout(autoTimer);
+      autoTimer = null;
+    }
     button.textContent = args.button_label || "🔄 手動更新即時車數";
     button.disabled = Boolean(event.data.disabled) || busy;
-    scheduleAutoSync();
+    if (pendingInitialSync && !busy) {
+      pendingInitialSync = false;
+      runSync({ forceDelivery: true });
+    } else {
+      scheduleAutoSync();
+    }
     setHeight();
   });
 
@@ -11637,6 +11677,35 @@ render_context_strip(
 )
 render_binding_vehicle_requirements(base_df, selected_shift=selected_shift)
 
+# 同步元件常駐主頁，避免手機將收合面板內的 iframe 延後載入。
+browser_payload = None
+sync_error_key = f"browser_youbike_sync_error::{current_context_key}"
+try:
+    browser_sync_component = get_youbike_browser_sync_component()
+    browser_payload = browser_sync_component(
+        catalog_url=YOUBIKE_STATION_CATALOG_URL,
+        parking_url=YOUBIKE_PARKING_INFO_URL,
+        # 第一輪每次最多查 20 站，最多 4 個請求並行；後續只重查漏站。
+        batch_size=20,
+        request_concurrency=4,
+        max_batch_rounds=8,
+        max_single_rounds=3,
+        wave_delay_ms=70,
+        button_label="🔄 手動更新即時車數",
+        auto_refresh=True,
+        auto_refresh_seconds=60,
+        signature_scope=active_base["token"],
+        force_initial_delivery=not bool(
+            isinstance(previous_live_meta, dict) and previous_live_meta.get("fetched_at")
+        ),
+        key=f"browser_youbike_sync::{current_context_key}",
+        default=None,
+    )
+except YouBikeDataError as exc:
+    st.session_state[sync_error_key] = f"瀏覽器同步元件建立失敗：{exc}"
+except Exception as exc:
+    st.session_state[sync_error_key] = f"瀏覽器同步元件發生未預期錯誤：{exc}"
+
 with st.expander("即時資料狀態與配對明細", expanded=False):
     if isinstance(previous_live_meta, dict) and previous_live_meta.get("fetched_at"):
         previous_source_time = str(previous_live_meta.get("latest_source_time") or "").strip()
@@ -11647,36 +11716,9 @@ with st.expander("即時資料狀態與配對明細", expanded=False):
         )
 
     st.caption(
-        "即時數據預設每 1 分鐘自動更新一次；右側懸浮「更新」按鈕可隨時手動更新。"
+        "開啟頁面後立即讀取即時數據，之後每 1 分鐘自動更新一次；右側懸浮「更新」按鈕可隨時手動更新。"
         "目的地一旦同意前往會保持鎖定，不會因即時數據變動自行換站。"
     )
-
-    browser_payload = None
-    try:
-        browser_sync_component = get_youbike_browser_sync_component()
-        browser_payload = browser_sync_component(
-            catalog_url=YOUBIKE_STATION_CATALOG_URL,
-            parking_url=YOUBIKE_PARKING_INFO_URL,
-            # 第一輪每次最多查 20 站，最多 4 個請求並行；後續只重查漏站。
-            batch_size=20,
-            request_concurrency=4,
-            max_batch_rounds=8,
-            max_single_rounds=3,
-            wave_delay_ms=70,
-            button_label="🔄 手動更新即時車數",
-            auto_refresh=True,
-            auto_refresh_seconds=60,
-            signature_scope=active_base["token"],
-            force_initial_delivery=not bool(
-                isinstance(previous_live_meta, dict) and previous_live_meta.get("fetched_at")
-            ),
-            key=f"browser_youbike_sync::{current_context_key}",
-            default=None,
-        )
-    except YouBikeDataError as exc:
-        st.error(f"瀏覽器同步元件建立失敗：{exc}")
-    except Exception as exc:
-        st.error(f"瀏覽器同步元件發生未預期錯誤：{exc}")
 
     if isinstance(browser_payload, dict):
         browser_event_id = str(browser_payload.get("event_id") or "").strip()
@@ -11725,8 +11767,9 @@ with st.expander("即時資料狀態與配對明細", expanded=False):
                     )
 
                     if live_summary["matched_count"] <= 0:
-                        st.error("沒有任何場站通過安全配對，因此未修改現況資料。")
+                        st.session_state[sync_error_key] = "沒有任何場站通過安全配對，因此未修改現況資料。"
                     else:
+                        st.session_state.pop(sync_error_key, None)
                         base_df = live_updated_df
                         live_event_id = str(live_payload.get("event_id") or browser_event_id or "")
                         common_live_meta = {
@@ -11804,10 +11847,13 @@ with st.expander("即時資料狀態與配對明細", expanded=False):
                                 row_height=35,
                             )
             except YouBikeDataError as exc:
-                st.error(f"YouBike 官網同步失敗：{exc}")
+                st.session_state[sync_error_key] = f"YouBike 官網同步失敗：{exc}"
             except Exception as exc:
-                st.error(f"YouBike 官網同步發生未預期錯誤：{exc}")
+                st.session_state[sync_error_key] = f"YouBike 官網同步發生未預期錯誤：{exc}"
 
+sync_error = st.session_state.get(sync_error_key)
+if sync_error:
+    st.error(f"{sync_error}。請按右側「更新」重試，或展開「即時資料狀態與配對明細」查看狀態。")
 
 station_alerts = build_station_alert_records(base_df)
 notify_station_alert_changes(
