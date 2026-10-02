@@ -290,3 +290,29 @@ test('disabling auto refresh clears its timer while retaining manual updates', a
   await app.advance(60000);
   assert.equal(app.catalogRequests(), 2);
 });
+
+test('official area codes exclude neighbouring counties while preserving legacy Taitung records', async () => {
+  const stations = [
+    { station_no: '508001', name_tw: '臺東官方站', area_code: 15 },
+    { station_no: '508002', name_tw: '臺東文字備援站', county_tw: '臺東縣' },
+    { station_no: '508003', name_tw: '座標備援站', area_code: '', lat: 22.755, lng: 121.151 },
+    { station_no: '514001', name_tw: '屏東範圍內站', area_code: '14', lat: 22.00, lng: 120.80 },
+    { station_no: '514002', name_tw: '臺東字樣的外縣市站', area_code: '14', county_tw: '臺東縣' },
+    { station_no: '500001', name_tw: '範圍外站', lat: 25.05, lng: 121.50 },
+  ];
+  const app = harness((url, options) => {
+    if (options.method !== 'POST') return response({ retCode: 1, retVal: { data: stations } });
+    const requested = JSON.parse(options.body).station_no;
+    return response({ retCode: 1, retVal: { data: requested.map(station_no => ({
+      ...parkingPayload().retVal.data[0], station_no,
+    })) } });
+  });
+  app.render();
+  await app.advance(0);
+  const [value] = app.values();
+  assert.equal(value.ok, true);
+  assert.deepEqual(Array.from(value.records, record => record.station_id), ['508001', '508002', '508003']);
+  const requested = app.requests.filter(request => request.options.method === 'POST')
+    .flatMap(request => JSON.parse(request.options.body).station_no);
+  assert.deepEqual(requested, ['508001', '508002', '508003']);
+});

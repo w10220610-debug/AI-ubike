@@ -245,6 +245,11 @@ def coerce_nullable_current_status(status_df: pd.DataFrame) -> pd.DataFrame:
         if column not in normalized_df.columns:
             normalized_df[column] = pd.Series(pd.NA, index=normalized_df.index, dtype="Int64")
             continue
+        # 已正規化的即時車數保留 nullable 整數，避免每次重跑又轉浮點再轉回。
+        if isinstance(normalized_df[column].dtype, pd.Int64Dtype):
+            if bool(normalized_df[column].lt(0).any()):
+                normalized_df[column] = normalized_df[column].clip(lower=0)
+            continue
         numeric = pd.to_numeric(
             normalized_df[column].replace(STATUS_UNAVAILABLE_TEXT, pd.NA),
             errors="coerce",
@@ -262,6 +267,10 @@ def coerce_nullable_station_status(status_df: pd.DataFrame) -> pd.DataFrame:
     for column in STATION_LIVE_COLUMNS:
         if column not in normalized_df.columns:
             normalized_df[column] = pd.Series(pd.NA, index=normalized_df.index, dtype="Int64")
+            continue
+        if isinstance(normalized_df[column].dtype, pd.Int64Dtype):
+            if bool(normalized_df[column].lt(0).any()):
+                normalized_df[column] = normalized_df[column].clip(lower=0)
             continue
         numeric = pd.to_numeric(normalized_df[column], errors="coerce")
         normalized_df[column] = pd.Series(
@@ -1027,6 +1036,9 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
     return [];
   }
   function isTaitung(item) {
+    // 官方區域碼可避免邊界內的其他縣市被誤列為臺東；舊資料才用文字／座標備援。
+    const areaCode = String(item.area_code ?? "").trim();
+    if (areaCode) return areaCode === "15";
     const locationText = [
       item.county_tw, item.city_tw, item.scity, item.district_tw,
       item.address_tw, item.name_tw, item.sarea, item.ar, item.sna
@@ -1662,6 +1674,9 @@ def _youbike_station_similarity(excel_name: str, api_name: str) -> float:
 
 def _looks_like_taitung_station(record: dict) -> bool:
     """以官方欄位及經緯度範圍篩出臺東縣候選場站。"""
+    area_code = str(record.get("area_code") if record.get("area_code") is not None else "").strip()
+    if area_code:
+        return area_code == "15"
     location_text = " ".join(
         str(record.get(key) or "")
         for key in (
@@ -4417,13 +4432,16 @@ DISPATCH_GEOLOCATION_COMPONENT_HTML = r"""<!doctype html>
     }
   }
   function scheduleAutoLocate() {
-    clearAutoTimer();
-    if (!args.auto_refresh) return;
+    if (!args.auto_refresh) {
+      clearAutoTimer();
+      return;
+    }
+    // 一般重算沿用既有倒數，避免連續操作延後定位；請求完成後才排下一次。
+    if (busy || autoTimer !== null) return;
     const seconds = Math.max(10, Math.min(300, Number(args.auto_refresh_seconds || 30)));
     autoTimer = window.setTimeout(() => {
       autoTimer = null;
-      if (busy) scheduleAutoLocate();
-      else runLocate({ automatic: true });
+      if (!busy) runLocate({ automatic: true });
     }, seconds * 1000);
   }
   function setValue(value) {
@@ -5096,12 +5114,26 @@ def _build_floating_battery_query_html(
       __LOW_BATTERY_CLIENT_CORE__
       const routeStations = __ROUTE_STATIONS__;
       const displayMode = __DISPLAY_MODE__;
-      const fingerprint = __BATTERY_FINGERPRINT__;
+      const fingerprint = __BATTERY_FINGERPRINT__ + "-panel-v2";
       const doc = window.parent.document;
       const win = window.parent;
       const catalogUrl = "https://apis.youbike.com.tw/json/station-min-yb2.json";
       const batteryUrl = "https://apis.youbike.com.tw/api/front/bike/lists";
       const batteryService = ensureUbikeBatteryService(win);
+      function updateBatteryFabPosition() {
+        const existingFab = doc.getElementById("ubike-battery-fab");
+        // 桌面模式交由既有 CSS media query 隨視窗寬度調整，避免行動版 inline 值卡住。
+        if (existingFab) existingFab.style.bottom = displayMode === "mobile"
+          ? "calc(312px + env(safe-area-inset-bottom, 0px))" : "";
+      }
+      // 相同配置沿用既有面板，保留已選範圍、查詢結果、定位及進行中的查詢。
+      if (win.__ubikeBatteryFingerprint === fingerprint
+          && doc.getElementById("ubike-battery-fab")
+          && doc.getElementById("ubike-battery-page")
+          && doc.getElementById("ubike-battery-style")) {
+        updateBatteryFabPosition();
+        return;
+      }
       const defaultThreshold = 89;
       const defaultPriorityThreshold = 40;
       // 換版後使用新偏好鍵，讓本版第一次開啟時確實以 89% 為預設值。
@@ -5113,6 +5145,10 @@ def _build_floating_battery_query_html(
         doc.body.style.overflow = String(win.__ubikeBatteryPreviousBodyOverflow || "");
       }
       win.__ubikeBatteryFingerprint = fingerprint;
+
+      if (win.__ubikeBatteryKeyHandler) {
+        win.removeEventListener("keydown", win.__ubikeBatteryKeyHandler);
+      }
 
       doc.getElementById("ubike-battery-fab")?.remove();
       doc.getElementById("ubike-battery-page")?.remove();
@@ -6613,13 +6649,12 @@ def _build_floating_battery_query_html(
         if (lastResults.length) renderResults();
         else savePreferences();
       });
-      win.addEventListener("keydown", event => {
+      win.__ubikeBatteryKeyHandler = event => {
         if (event.key === "Escape" && page.classList.contains("open")) closePage();
-      });
+      };
+      win.addEventListener("keydown", win.__ubikeBatteryKeyHandler);
 
-      if (displayMode === "mobile" || win.matchMedia("(max-width: 700px)").matches) {
-        fab.style.bottom = "calc(312px + env(safe-area-inset-bottom, 0px))";
-      }
+      updateBatteryFabPosition();
       if (previousPageWasOpen) openPage();
     })();
     </script>
