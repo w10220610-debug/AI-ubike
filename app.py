@@ -45,10 +45,9 @@ DEFAULT_BATTERY_THRESHOLD = 89
 DEFAULT_BATTERY_PRIORITY_THRESHOLD = 40
 SMART_DISPATCH_CANDIDATE_LIMIT = 10
 
-# 賈維斯測試版：庫存場站平常不列入自動推薦；只有本站已接近空站或滿站時解鎖。
+# 庫存場站規則：庫存場站平常不列入自動推薦；只有本站已接近空站或滿站時解鎖。
 INVENTORY_STATION_NAMES = ("臺東縣政府文化處圖書館", "臺東轉運站")
 INVENTORY_STATION_ALERT_EDGE = 1
-JARVIS_WAKE_WORD = "賈維斯"
 
 
 def is_mobile_browser() -> bool:
@@ -2637,7 +2636,7 @@ def render_app_hero() -> None:
         <section class="dispatch-hero">
           <div class="dispatch-hero-copy">
             <div class="dispatch-kicker">TAITUNG · SMART DISPATCH</div>
-            <div id="jarvis-secret-trigger" class="dispatch-version-badge" title="">測試版</div>
+            <div class="dispatch-version-badge" title="">測試版</div>
             <h1>臺東 YouBike 智慧調度</h1>
             <p>配置、即時車數、分析與依實際道路路網計算的 AI 路線，集中在同一套工作流程。</p>
           </div>
@@ -4741,829 +4740,13 @@ LOW_BATTERY_CLIENT_CORE_JS = r"""
       }
 """
 
-JARVIS_TRIGGER_BOOTSTRAP_HTML = r'''<!doctype html>
-<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>html,body{width:1px;height:1px;margin:0;overflow:hidden;background:transparent}</style></head><body>
-<script>
-(() => {
-  const win = window.parent;
-  const doc = win.document;
-  const STORAGE_KEY = "taitung-jarvis-enabled-v1";
-  const GLOBAL_KEY = "__taitungJarvisTriggerBootstrapV3";
-
-  // 若同一個瀏覽器頁面仍殘留 V28.1 的五連點 state，讓它永遠不會累積到五下。
-  // 正常重新載入頁面時不會遇到，但 Streamlit 熱重載時可以避免舊監聽器重複切換。
-  const legacyState = win.__taitungJarvisTriggerBootstrapV2;
-  if (legacyState && typeof legacyState === "object") legacyState.count = -1000000;
-
-  function ensureStyle(){
-    if(doc.getElementById("jarvis-trigger-bootstrap-style")) return;
-    const style=doc.createElement("style");
-    style.id="jarvis-trigger-bootstrap-style";
-    style.textContent=`
-      #jarvis-secret-trigger{touch-action:manipulation!important;user-select:none!important;-webkit-user-select:none!important;cursor:pointer!important}
-      #jarvis-voice-indicator{position:fixed;right:12px;top:max(72px,calc(env(safe-area-inset-top,0px) + 58px));bottom:auto;z-index:2147483000;display:none;
-        align-items:center;gap:7px;padding:7px 10px;border:1px solid rgba(85,246,255,.35);border-radius:999px;
-        background:rgba(4,16,29,.88);color:#dffcff;box-shadow:0 8px 24px rgba(0,0,0,.24);
-        font:800 12px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft JhengHei",sans-serif;backdrop-filter:blur(8px)}
-      #jarvis-voice-indicator.on{display:flex} #jarvis-voice-indicator .dot{width:8px;height:8px;border-radius:50%;background:#55f6ff;box-shadow:0 0 10px #55f6ff}
-      #jarvis-voice-indicator.busy .dot{background:#ff5da2;box-shadow:0 0 12px #ff5da2}
-    `;
-    doc.head.appendChild(style);
-  }
-  function readEnabled(){ try{return win.sessionStorage.getItem(STORAGE_KEY)==="1";}catch(_){return false;} }
-  function writeEnabled(value){ try{win.sessionStorage.setItem(STORAGE_KEY,value?"1":"0");}catch(_){} }
-  function isStandalone(){
-    try{return Boolean(win.navigator.standalone) || win.matchMedia("(display-mode: standalone)").matches;}catch(_){return false;}
-  }
-  function speechRecognitionCtor(){ return win.SpeechRecognition || win.webkitSpeechRecognition || null; }
-  function preferredZhVoice(){
-    try{
-      const voices=win.speechSynthesis?.getVoices?.() || [];
-      return voices.find(v=>/^zh-TW$/i.test(v.lang)) || voices.find(v=>/^zh/i.test(v.lang)) || null;
-    }catch(_){return null;}
-  }
-  function sayActivation(message){
-    try{
-      if(!win.speechSynthesis || !win.SpeechSynthesisUtterance) return;
-      win.speechSynthesis.cancel();
-      const u=new win.SpeechSynthesisUtterance(message); u.lang="zh-TW"; u.rate=1.02;
-      const voice=preferredZhVoice(); if(voice) u.voice=voice;
-      win.speechSynthesis.speak(u);
-    }catch(_){}
-  }
-  function primeMicrophone(){
-    // 這個函式一定由使用者點擊直接觸發，讓 iOS 有機會在 user gesture 內要求權限。
-    const R=speechRecognitionCtor();
-    if(!R){ reflect(true, isStandalone()?"此模式不支援語音，請用 Safari 開啟":"瀏覽器不支援語音辨識"); return; }
-    try{
-      const probe=new R(); probe.lang="zh-TW"; probe.continuous=false; probe.interimResults=false;
-      let stopped=false;
-      probe.onstart=()=>{ win.setTimeout(()=>{if(!stopped){stopped=true;try{probe.stop();}catch(_){}}},180); };
-      probe.onerror=(event)=>{
-        const err=String(event?.error || "");
-        if(err==="not-allowed"||err==="service-not-allowed") reflect(true,"請開啟麥克風／Siri 聽寫權限");
-      };
-      probe.start();
-    }catch(_){}
-  }
-  function ensureIndicator(){
-    ensureStyle();
-    let node=doc.getElementById("jarvis-voice-indicator");
-    if(!node){
-      node=doc.createElement("div"); node.id="jarvis-voice-indicator";
-      node.innerHTML='<span class="dot"></span><span class="label">賈維斯測試已開啟</span>';
-      doc.body.appendChild(node);
-    }
-    return node;
-  }
-  function reflect(enabled, label){
-    const node=ensureIndicator();
-    node.classList.toggle("on", Boolean(enabled));
-    node.classList.remove("busy");
-    const labelNode=node.querySelector(".label");
-    if(labelNode) labelNode.textContent=label || (enabled?"賈維斯測試已開啟":"賈維斯已關閉");
-  }
-  function toggle(){
-    const enabled=!readEnabled();
-    writeEnabled(enabled);
-    reflect(enabled, enabled?"賈維斯測試已開啟":"賈維斯已關閉");
-    if(enabled){ primeMicrophone(); sayActivation("賈維斯已啟動"); }
-    else { try{win.speechSynthesis?.cancel?.();}catch(_){} }
-    win.dispatchEvent(new CustomEvent("taitung:jarvis-enabled-change", {detail:{enabled}}));
-    if(!enabled){
-      win.setTimeout(()=>{ const node=doc.getElementById("jarvis-voice-indicator"); if(node && !readEnabled()) node.classList.remove("on"); },700);
-    }
-  }
-
-  ensureStyle();
-  reflect(readEnabled(), readEnabled()?"賈維斯測試已開啟":"賈維斯已關閉");
-  if(!readEnabled()) ensureIndicator().classList.remove("on");
-
-  if(win[GLOBAL_KEY]) return;
-  const state={lastTouchAt:0};
-  function registerTap(event){
-    const target=event.target && event.target.closest ? event.target.closest("#jarvis-secret-trigger") : null;
-    if(!target) return;
-    const now=Date.now();
-    if(event.type==="touchend"){
-      state.lastTouchAt=now;
-      event.preventDefault();
-      toggle();
-      return;
-    }
-    // iOS touchend 之後通常還會補一個 click；這個 click 必須忽略，否則會立刻開了又關。
-    if(event.type==="click" && now-state.lastTouchAt<800) return;
-    event.preventDefault();
-    toggle();
-  }
-  // iPhone/iPad 用 touchend；桌機／其他裝置用 click。事件委派可承受 Streamlit 重畫 DOM。
-  doc.addEventListener("touchend", registerTap, {capture:true, passive:false});
-  doc.addEventListener("click", registerTap, true);
-  doc.addEventListener("contextmenu", event=>{
-    const target=event.target && event.target.closest ? event.target.closest("#jarvis-secret-trigger") : null;
-    if(target) event.preventDefault();
-  }, true);
-  win[GLOBAL_KEY]=state;
-})();
-</script></body></html>'''
 
 
-def render_jarvis_trigger_bootstrap() -> None:
-    """頁面一載入就掛上賈維斯單擊入口；不等待 GPS、推薦或語音元件。"""
-    components.html(JARVIS_TRIGGER_BOOTSTRAP_HTML, height=1, scrolling=False)
 
 
-JARVIS_BROWSER_COMPONENT_HTML = r'''<!doctype html>
-<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>html,body{width:1px;height:1px;margin:0;overflow:hidden;background:transparent}</style></head><body>
-<script>
-(() => {
-  __LOW_BATTERY_CLIENT_CORE__
-  const API_VERSION = 1;
-  const win = window.parent;
-  const doc = win.document;
-  const service = ensureUbikeBatteryService(win);
-  const STORAGE_KEY = "taitung-jarvis-enabled-v1";
-  let args = {};
-  let recognition = null;
-  let listening = false;
-  let enabled = false;
-  let speaking = false;
-  let lastSpeech = "";
-  let lastHeard = "";
-  let wakeWindowUntil = 0;
-  let awaitingActual = false;
-  let awaitingConfirm = false;
-  let pendingActual = null;
-  let currentPlan = null;
-  let candidates = [];
-  let contextStatus = "updating";
-  let contextMessage = "";
-  let lastAutoAnnounceToken = "";
-  let pressTimer = null;
-  // V28.9：Safari 有時不觸發 SpeechSynthesisUtterance.onend。
-  // 用獨立 watchdog 判斷語音是否真的播完，確保賈維斯一定會恢復聆聽。
-  let speechRunId = 0;
-  let speechWatchTimer = null;
-  let speechHardTimer = null;
-  let activeUtterances = [];
-
-  function send(type, data = {}) {
-    win.postMessage({isStreamlitMessage:true, type, ...data}, "*");
-  }
-  function setHeight(){ send("streamlit:setFrameHeight", {height:1}); }
-  function emit(type, detail = {}) {
-    send("streamlit:setComponentValue", {
-      value: {type, event_id:`${Date.now()}-${Math.random().toString(16).slice(2)}`, ...detail},
-      dataType:"json",
-    });
-  }
-  function emitAction(type, detail = {}) {
-    // Streamlit rerun 前先把動作送出；並把去重狀態放在 parent window，避免元件重建後同一句又執行一次。
-    const signature=JSON.stringify([type,text(detail.station_name),text(detail.target_text),
-      num(detail.unload_bike),num(detail.unload_ebike),num(detail.pickup_bike),num(detail.pickup_ebike),text(detail.heard)]);
-    const now=Date.now();
-    let last=null; try{last=win.__taitungJarvisLastAction||null;}catch(_){}
-    if(last && last.signature===signature && now-Number(last.at||0)<2500){
-      setIndicator("已忽略重複口令");
-      return false;
-    }
-    try{win.__taitungJarvisLastAction={signature,at:now};}catch(_){}
-    emit(type,detail);
-    return true;
-  }
-  function text(value){ return String(value ?? "").trim(); }
-  function num(value){ const n=Number(value); return Number.isFinite(n)?Math.max(0,Math.trunc(n)):0; }
-
-  // V28.8：語音動作先直接控制目前 Streamlit 畫面。
-  // 這條 DOM bridge 不依賴 custom component value 是否觸發 fragment rerun，
-  // 因此手機 Safari 上也能立刻看到按鈕被按下或數字欄位被改變。
-  function uiText(value){ return text(value).replace(/[\s\uFE0F]/g,"").replace(/[✅⏭️❌🧭]/g,""); }
-  function elementUsable(node){
-    if(!node || node.disabled) return false;
-    const style=win.getComputedStyle ? win.getComputedStyle(node) : null;
-    if(style && (style.display==="none" || style.visibility==="hidden")) return false;
-    return true;
-  }
-  function findButtonByText(labels){
-    const wanted=(Array.isArray(labels)?labels:[labels]).map(uiText).filter(Boolean);
-    const buttons=Array.from(doc.querySelectorAll("button"));
-    for(const button of buttons){
-      if(!elementUsable(button)) continue;
-      const label=uiText(button.innerText || button.textContent || "");
-      if(wanted.some(item=>label===item || label.includes(item))) return button;
-    }
-    return null;
-  }
-  function clickUiButton(labels){
-    const button=findButtonByText(labels);
-    if(!button) return false;
-    try{ button.scrollIntoView({block:"center",behavior:"auto"}); }catch(_){}
-    try{ button.focus({preventScroll:true}); }catch(_){}
-    button.click();
-    return true;
-  }
-  function findNumberInputByLabel(labelText){
-    const wanted=uiText(labelText);
-    const groups=Array.from(doc.querySelectorAll('[data-testid="stNumberInput"]'));
-    for(const group of groups){
-      const label=group.querySelector("label");
-      const labelValue=uiText(label ? (label.innerText || label.textContent || "") : "");
-      if(labelValue===wanted){
-        const input=group.querySelector('input[type="number"], input');
-        if(input) return input;
-      }
-    }
-    // Streamlit DOM 結構若改版，退回以鄰近文字精確比對。
-    for(const input of Array.from(doc.querySelectorAll('input[type="number"]'))){
-      const group=input.closest('[data-testid="stNumberInput"]') || input.parentElement?.parentElement;
-      const content=uiText(group ? (group.innerText || group.textContent || "") : "");
-      if(content.startsWith(wanted)) return input;
-    }
-    return null;
-  }
-  function setNumberInputValue(labelText,value){
-    const input=findNumberInputByLabel(labelText);
-    if(!input) return false;
-    const next=String(num(value));
-    try{ input.focus({preventScroll:true}); }catch(_){}
-    try{
-      const ownSetter=Object.getOwnPropertyDescriptor(input,"value")?.set;
-      const protoSetter=Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype,"value")?.set;
-      (protoSetter || ownSetter)?.call(input,next);
-    }catch(_){ input.value=next; }
-    input.dispatchEvent(new win.Event("input",{bubbles:true}));
-    input.dispatchEvent(new win.Event("change",{bubbles:true}));
-    try{ input.blur(); }catch(_){}
-    return uiText(input.value)===uiText(next) || String(input.value)===next;
-  }
-  function applyActualToUi(actual){
-    const values=[
-      ["實際下車 2.0",actual.unload_bike],
-      ["實際上車 2.0",actual.pickup_bike],
-      ["實際下車 2.0E",actual.unload_ebike],
-      ["實際上車 2.0E",actual.pickup_ebike],
-    ];
-    let applied=0;
-    for(const [label,value] of values){ if(setNumberInputValue(label,value)) applied+=1; }
-    return applied===values.length;
-  }
-  function cn(value) {
-    const n=num(value);
-    const digits=["零","一","二","三","四","五","六","七","八","九"];
-    if(n<10) return digits[n];
-    if(n===10) return "十";
-    if(n<20) return `十${digits[n-10]}`;
-    if(n<100) return `${digits[Math.floor(n/10)]}十${n%10?digits[n%10]:""}`;
-    return String(n);
-  }
-  function countPart(n, kind){ return num(n)>0 ? `${cn(n)}${kind}` : ""; }
-  function actionPhrase(plan) {
-    if(!plan) return "";
-    const down=[countPart(plan.unload_bike,"般"),countPart(plan.unload_ebike,"電")].filter(Boolean).join("");
-    const up=[countPart(plan.pickup_bike,"般"),countPart(plan.pickup_ebike,"電")].filter(Boolean).join("");
-    const parts=[];
-    if(down) parts.push(`下${down}`);
-    if(up) parts.push(`上${up}`);
-    return parts.join("，") || "目前無需上下車";
-  }
-  function stationPhrase(plan){ return plan ? `${text(plan.station_name)}，${actionPhrase(plan)}` : "目前沒有可執行場站"; }
-  function currentStation(){ return text((currentPlan||{}).station_name || (candidates[0]||{}).station_name); }
-  function contextReply(){
-    if(contextMessage) return contextMessage;
-    if(contextStatus==="updating") return "調度資料更新中，請稍後再說一次";
-    if(contextStatus==="unavailable") return "調度資料目前無法使用，請稍後更新";
-    if(contextStatus==="blocked") return "目前條件無法執行智慧調度，請先修正畫面提示";
-    if(contextStatus==="no_candidates") return "目前沒有可執行場站";
-    return "";
-  }
-  function contextReady(){ return contextStatus==="ready"; }
-  function standbyLabel(){
-    const station=currentStation();
-    if(contextStatus==="ready" && station) return `賈維斯待命｜${station}`;
-    if(contextStatus==="no_candidates") return "賈維斯待命｜暫無可執行場站";
-    if(contextStatus==="blocked") return "賈維斯待命｜請先修正調度條件";
-    if(contextStatus==="unavailable") return "賈維斯待命｜調度服務暫不可用";
-    return "賈維斯待命｜調度資料更新中";
-  }
-  function isIOS(){ return /iPad|iPhone|iPod/.test(win.navigator.userAgent||"") || (win.navigator.platform==="MacIntel" && Number(win.navigator.maxTouchPoints)>1); }
-  function isStandalone(){ try{return Boolean(win.navigator.standalone) || win.matchMedia("(display-mode: standalone)").matches;}catch(_){return false;} }
-  function preferredZhVoice(){
-    try{
-      const voices=win.speechSynthesis?.getVoices?.() || [];
-      return voices.find(v=>/^zh-TW$/i.test(v.lang)) || voices.find(v=>/^zh/i.test(v.lang)) || null;
-    }catch(_){return null;}
-  }
-
-  function ensureStyle() {
-    if(doc.getElementById("jarvis-voice-style")) return;
-    const style=doc.createElement("style");
-    style.id="jarvis-voice-style";
-    style.textContent=`
-      #jarvis-secret-trigger{touch-action:manipulation;user-select:none;-webkit-user-select:none;cursor:pointer}
-      #jarvis-voice-indicator{position:fixed;right:12px;top:max(72px,calc(env(safe-area-inset-top,0px) + 58px));bottom:auto;z-index:2147483000;display:none;
-        align-items:center;gap:7px;padding:7px 10px;border:1px solid rgba(85,246,255,.35);border-radius:999px;
-        background:rgba(4,16,29,.88);color:#dffcff;box-shadow:0 8px 24px rgba(0,0,0,.24);
-        font:800 12px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft JhengHei",sans-serif;backdrop-filter:blur(8px)}
-      #jarvis-voice-indicator.on{display:flex} #jarvis-voice-indicator .dot{width:8px;height:8px;border-radius:50%;background:#55f6ff;box-shadow:0 0 10px #55f6ff}
-      #jarvis-voice-indicator.busy .dot{background:#ff5da2;box-shadow:0 0 12px #ff5da2}
-    `;
-    doc.head.appendChild(style);
-  }
-  function ensureIndicator() {
-    ensureStyle();
-    let node=doc.getElementById("jarvis-voice-indicator");
-    if(!node){ node=doc.createElement("div"); node.id="jarvis-voice-indicator"; node.innerHTML='<span class="dot"></span><span class="label">賈維斯待命</span>'; doc.body.appendChild(node); }
-    node.classList.toggle("on",enabled);
-    return node;
-  }
-  function setIndicator(label,busy=false){ const node=ensureIndicator(); node.querySelector(".label").textContent=label; node.classList.toggle("busy",busy); }
-
-  function normalizeSpeechText(value){
-    let s=text(value);
-    try{s=s.normalize("NFKC");}catch(_){}
-    return s
-      .replace(/[，,。.!！?？；;：:]/g," ")
-      .replace(/\s+/g," ")
-      .trim();
-  }
-  const WAKE_RE=/(?:賈維斯|贾维斯|假維斯|假维斯|加維斯|加维斯|甲維斯|甲维斯|佳維斯|佳维斯|嘉維斯|嘉维斯|賈偉斯|贾伟斯|賈威斯|贾威斯|jarvis)/i;
-  function wakeVariants(t){ return WAKE_RE.test(normalizeSpeechText(t)); }
-  function stripWake(t){ return normalizeSpeechText(t).replace(new RegExp(`(?:嘿|嗨|hey)?\\s*${WAKE_RE.source}[\\s，,。.!！?？]*`,"ig"),"").trim(); }
-  function normalizeActualText(value){
-    const nums="零〇一二兩两三四五六七八九十百\\d";
-    let s=normalizeSpeechText(value)
-      .replace(/(?:麻煩|麻烦)?(?:幫我|帮我)?(?:輸入|输入|填入|填上|設定|设定|記錄|记录)/g," ")
-      .replace(/上車|上车/g,"上")
-      .replace(/下車|下车/g,"下")
-      .replace(/一般/g,"一 般")
-      .replace(/兩般|两般/g,"二般")
-      .replace(/兩電|两電|兩电|两电/g,"二電");
-    s=s.replace(new RegExp(`([${nums}]+)\\s*(?:台)?\\s*(?:班|搬|斑)`,"g"),"$1般");
-    s=s.replace(new RegExp(`([${nums}]+)\\s*(?:台)?\\s*(?:电|點|点|店|殿)`,"g"),"$1電");
-    return s.replace(/[和跟與与及、]/g," ").replace(/\s+/g," ").trim();
-  }
-  function commandScore(value, confidence=0){
-    const raw=normalizeSpeechText(value); const normalized=normalizeActualText(raw);
-    let score=Math.max(0,Number(confidence)||0)*5;
-    if(wakeVariants(raw)) score+=100;
-    if(/(?:輸入|输入|填入|設定|设定|記錄|记录)/.test(raw)) score+=45;
-    if(/分析|下一站|抵達|抵达|完成|確認|确认|跳過|跳过|電池|电池|低電|低电|重複|重复|口令|指令|測試|测试/.test(raw)) score+=35;
-    if(/[上下]/.test(normalized)) score+=20;
-    if(/般|電/.test(normalized)) score+=25;
-    if(/[零〇一二兩两三四五六七八九十百\d]/.test(normalized)) score+=15;
-    if((awaitingActual||awaitingConfirm) && /確認|确认|完成|取消|重來|重来|[上下]/.test(normalized)) score+=80;
-    return score;
-  }
-  function pickBestTranscript(result){
-    let best=""; let bestScore=-1;
-    const count=Math.max(1,Math.min(Number(result?.length)||1,5));
-    for(let j=0;j<count;j+=1){
-      const alt=result[j]; const transcript=text(alt?.transcript);
-      if(!transcript) continue;
-      const score=commandScore(transcript,alt?.confidence);
-      if(score>bestScore){bestScore=score;best=transcript;}
-    }
-    return best || text(result?.[0]?.transcript);
-  }
-
-  function stopRecognition(){
-    if(recognition && listening){
-      try{
-        if(isIOS() && typeof recognition.abort==="function") recognition.abort();
-        else recognition.stop();
-      }catch(_){}
-    }
-    listening=false;
-  }
-  function bindRecognition(instance){
-    instance.lang="zh-TW";
-    instance.continuous=false;
-    instance.interimResults=false;
-    instance.maxAlternatives=5;
-    instance.onstart=()=>{listening=true;setIndicator(standbyLabel());};
-    instance.onend=()=>{
-      listening=false;
-      // 只要不是正在播賈維斯語音，就持續確保辨識會重新啟動。
-      if(enabled&&!speaking) win.setTimeout(startRecognition,isIOS()?220:350);
-    };
-    instance.onerror=(event)=>{
-      listening=false; const e=text(event?.error);
-      if(e==="not-allowed"||e==="service-not-allowed") setIndicator("請開啟麥克風／Siri 聽寫權限",true);
-      else if(e==="audio-capture") setIndicator("找不到可用麥克風",true);
-      else if(e==="network") setIndicator("語音辨識網路異常",true);
-      else if(e!=="aborted" && enabled&&!speaking) win.setTimeout(startRecognition,isIOS()?350:700);
-    };
-    instance.onresult=(event)=>{
-      for(let i=event.resultIndex;i<event.results.length;i+=1){
-        if(!event.results[i].isFinal) continue;
-        const transcript=pickBestTranscript(event.results[i]);
-        if(transcript) handleTranscript(transcript);
-      }
-    };
-    return instance;
-  }
-  function startRecognition(){
-    if(!enabled || speaking || listening) return;
-    if(win.speechSynthesis && (win.speechSynthesis.speaking || win.speechSynthesis.pending)){
-      win.setTimeout(startRecognition,250);
-      return;
-    }
-    const R=win.SpeechRecognition || win.webkitSpeechRecognition;
-    if(!R){ setIndicator(isStandalone()?"請改用 Safari 開啟語音":"瀏覽器不支援語音辨識",true); return; }
-    if(isStandalone()){ setIndicator("主畫面 App 可能無法語音，建議用 Safari",true); }
-    // iOS Safari 在一輪 TTS 後重用同一個 SpeechRecognition 實例偶爾會卡死；每輪建立新實例。
-    if(isIOS()) recognition=null;
-    if(!recognition) recognition=bindRecognition(new R());
-    try{
-      recognition.start();
-    }catch(_){
-      listening=false;
-      if(isIOS()) recognition=null;
-      if(enabled&&!speaking) win.setTimeout(startRecognition,500);
-    }
-  }
-  function clearSpeechRecoveryTimers(){
-    if(speechWatchTimer){ win.clearTimeout(speechWatchTimer); speechWatchTimer=null; }
-    if(speechHardTimer){ win.clearTimeout(speechHardTimer); speechHardTimer=null; }
-  }
-  function finishSpeech(runId,after,restartDelay=320){
-    if(runId!==speechRunId) return;
-    // 先讓目前 run 失效，避免 onend / onerror / watchdog 重複執行 after。
-    speechRunId+=1;
-    clearSpeechRecoveryTimers();
-    activeUtterances=[];
-    speaking=false;
-    listening=false;
-    if(isIOS()) recognition=null;
-    setIndicator(standbyLabel());
-    if(typeof after==="function"){ try{after();}catch(_){} }
-    if(enabled) win.setTimeout(startRecognition,restartDelay);
-  }
-  function watchSpeechCompletion(runId,after){
-    if(runId!==speechRunId) return;
-    let active=false;
-    try{active=Boolean(win.speechSynthesis && (win.speechSynthesis.speaking || win.speechSynthesis.pending || win.speechSynthesis.paused));}catch(_){}
-    if(!active){
-      finishSpeech(runId,after,300);
-      return;
-    }
-    speechWatchTimer=win.setTimeout(()=>watchSpeechCompletion(runId,after),400);
-  }
-  function splitSpeechChunks(phrase){
-    // 長篇「分析」拆句，避免 iOS 對單一超長 utterance 停止回呼。
-    const sentences=phrase.split(/(?<=[。！？!?])/).map(x=>text(x)).filter(Boolean);
-    const chunks=[];
-    for(const sentence of (sentences.length?sentences:[phrase])){
-      if(sentence.length<=72){ chunks.push(sentence); continue; }
-      let rest=sentence;
-      while(rest.length>72){
-        let cut=Math.max(rest.lastIndexOf("，",72),rest.lastIndexOf("、",72),rest.lastIndexOf(" ",72));
-        if(cut<24) cut=72;
-        chunks.push(text(rest.slice(0,cut+1)));
-        rest=text(rest.slice(cut+1));
-      }
-      if(rest) chunks.push(rest);
-    }
-    return chunks.length?chunks:[phrase];
-  }
-  function speak(message, after=null){
-    const phrase=text(message); if(!phrase) return;
-    const runId=++speechRunId;
-    clearSpeechRecoveryTimers();
-    lastSpeech=phrase; speaking=true; stopRecognition();
-    try{win.speechSynthesis.cancel();}catch(_){}
-    const chunks=splitSpeechChunks(phrase);
-    activeUtterances=[];
-    const voice=preferredZhVoice();
-    chunks.forEach((chunk,index)=>{
-      const utterance=new win.SpeechSynthesisUtterance(chunk);
-      utterance.lang="zh-TW"; utterance.rate=1.03;
-      if(voice) utterance.voice=voice;
-      utterance.onstart=()=>{ if(runId===speechRunId) setIndicator("賈維斯回覆中",true); };
-      if(index===chunks.length-1){
-        utterance.onend=()=>finishSpeech(runId,after,300);
-        utterance.onerror=()=>finishSpeech(runId,after,420);
-      }
-      activeUtterances.push(utterance);
-    });
-    try{
-      for(const utterance of activeUtterances) win.speechSynthesis.speak(utterance);
-    }catch(_){
-      finishSpeech(runId,after,450);
-      return;
-    }
-    // Safari 漏掉最後一個 onend 時，輪詢 speechSynthesis 狀態接管恢復。
-    speechWatchTimer=win.setTimeout(()=>watchSpeechCompletion(runId,after),900);
-    const hardMs=Math.min(60000,Math.max(9000,phrase.length*240+6500));
-    speechHardTimer=win.setTimeout(()=>{
-      if(runId!==speechRunId) return;
-      try{win.speechSynthesis.cancel();}catch(_){}
-      finishSpeech(runId,after,500);
-    },hardMs);
-  }
-
-  async function batteryInfo(stationName){
-    if(!stationName) return {low:[],ultra:[]};
-    try{
-      const result=await service.queryStationByName(stationName,{attempts:2,timeoutMs:12000});
-      const threshold=Math.max(0,Math.min(100,num(args.threshold)));
-      const priority=Math.max(0,Math.min(threshold,num(args.priority_threshold)));
-      const bikes=Array.isArray(result?.bikes)?result.bikes:[];
-      return {low:bikes.filter(x=>Number.isFinite(x.battery_power)&&x.battery_power<=threshold), ultra:bikes.filter(x=>Number.isFinite(x.battery_power)&&x.battery_power<=priority)};
-    }catch(error){ return {low:[],ultra:[],error:text(error?.message||error)}; }
-  }
-  function batterySuffix(info){
-    if(!info || info.error || !info.low?.length) return "";
-    if(info.ultra?.length) return `，低電${cn(info.low.length)}台，其中他媽超低電${cn(info.ultra.length)}台`;
-    return `，低電${cn(info.low.length)}台`;
-  }
-  async function speakOne(plan){
-    if(!contextReady()){speak(contextReply());return;}
-    if(!plan){speak("目前沒有可執行場站");return;}
-    setIndicator("正在查電量",true);
-    const info=await batteryInfo(text(plan.station_name));
-    speak(`${stationPhrase(plan)}${batterySuffix(info)}`);
-  }
-  async function speakAnalysis(){
-    if(!contextReady()){speak(contextReply());return;}
-    if(!candidates.length){speak("目前沒有可執行場站");return;}
-    setIndicator("正在分析",true);
-    const infos=[];
-    for(const plan of candidates){ infos.push(await batteryInfo(text(plan.station_name))); }
-    const phrases=candidates.map((plan,index)=>`${stationPhrase(plan)}${batterySuffix(infos[index])}`);
-    speak(phrases.join("。"));
-  }
-  async function speakUltra(){
-    if(!contextReady()){speak(contextReply());return;}
-    const station=currentStation(); if(!station){speak("目前沒有目標場站");return;}
-    setIndicator("正在查超低電",true); const info=await batteryInfo(station);
-    if(info.error){speak("超低電資料目前讀取失敗");return;}
-    if(!info.ultra.length){speak(`${station}，沒有超低電`);return;}
-    const pillars=info.ultra.map(x=>text(x.pillar_no)).filter(Boolean);
-    speak(`${station}，有${cn(info.ultra.length)}台超低電${pillars.length?`，柱號${pillars.join("、")}`:""}`);
-  }
-  async function speakBattery(){
-    if(!contextReady()){speak(contextReply());return;}
-    const station=currentStation(); if(!station){speak("目前沒有目標場站");return;}
-    setIndicator("正在查電池",true); const info=await batteryInfo(station);
-    if(info.error){speak("電池資料目前讀取失敗");return;}
-    if(!info.low.length){speak(`${station}，沒有低電`);return;}
-    const lowPillars=info.low.map(x=>text(x.pillar_no)).filter(Boolean);
-    const ultraPillars=info.ultra.map(x=>text(x.pillar_no)).filter(Boolean);
-    let message=`${station}，低電${cn(info.low.length)}台${lowPillars.length?`，柱號${lowPillars.join("、")}`:""}`;
-    if(info.ultra.length) message+=`。其中${ultraPillars.length?`${ultraPillars.join("、")}號柱`:cn(info.ultra.length)+"台"}他媽超低電`;
-    speak(message);
-  }
-
-  function parseCnNumber(token){
-    const raw=text(token); if(/^\d+$/.test(raw)) return Number(raw);
-    const map={"零":0,"〇":0,"一":1,"二":2,"兩":2,"两":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9};
-    if(raw==="十") return 10;
-    if(raw.includes("十")){
-      const [a,b]=raw.split("十"); const tens=a?map[a]??0:1; const ones=b?map[b]??0:0; return tens*10+ones;
-    }
-    return map[raw] ?? null;
-  }
-  function emptyActual(){ return {unload_bike:0,unload_ebike:0,pickup_bike:0,pickup_ebike:0}; }
-  function plannedActual(){ return currentPlan ? {unload_bike:num(currentPlan.unload_bike),unload_ebike:num(currentPlan.unload_ebike),pickup_bike:num(currentPlan.pickup_bike),pickup_ebike:num(currentPlan.pickup_ebike)} : emptyActual(); }
-  function parseActual(raw, allowDirectionFallback=false){
-    const normalized=normalizeActualText(raw);
-    if(/照原本|照計畫|照计划|一樣|一样/.test(normalized)) return plannedActual();
-    if(/都沒有|都没有|零台|沒上下|没上下|清空|歸零|归零/.test(normalized)) return emptyActual();
-    const result=emptyActual(); let matched=false; let ambiguous=false;
-    const plan=plannedActual();
-    const planOnlyDown=(plan.unload_bike+plan.unload_ebike)>0 && (plan.pickup_bike+plan.pickup_ebike)===0;
-    const planOnlyUp=(plan.pickup_bike+plan.pickup_ebike)>0 && (plan.unload_bike+plan.unload_ebike)===0;
-    const sections=[]; const sectionRe=/([上下])([^上下]*)/g; let sectionMatch;
-    while((sectionMatch=sectionRe.exec(normalized))!==null) sections.push({direction:sectionMatch[1]==="上"?"up":"down",body:sectionMatch[2]});
-    if(!sections.length){
-      let fallback="";
-      if(allowDirectionFallback) fallback=planOnlyDown?"down":planOnlyUp?"up":"";
-      if(!fallback) return null;
-      sections.push({direction:fallback,body:normalized});
-    }
-    for(const section of sections){
-      const re=/([零〇一二兩两三四五六七八九十百\d]+)\s*(?:台)?\s*(般|電)/g; let m; let sectionMatches=0;
-      while((m=re.exec(section.body))!==null){
-        const n=parseCnNumber(m[1]); if(n===null) continue;
-        matched=true; sectionMatches+=1;
-        const bike=m[2]==="般";
-        if(section.direction==="down") result[bike?"unload_bike":"unload_ebike"]+=n;
-        else result[bike?"pickup_bike":"pickup_ebike"]+=n;
-      }
-      // 有數字／車種字樣卻沒有被完整解析時，視為模糊，不猜。
-      const residue=section.body
-        .replace(/([零〇一二兩两三四五六七八九十百\d]+)\s*(?:台)?\s*(般|電)/g," ")
-        .replace(/(?:台|車|车|輛|辆|要|各|共|總共|总共|然後|然后|再|再來|再来|還有|还有|和|跟|與|与|及|的|請|请|幫我|帮我)/g," ")
-        .replace(/\s+/g,"")
-        .trim();
-      if(/[零〇一二兩两三四五六七八九十百\d般電班电點点店]/.test(residue) || (!sectionMatches && section.body.trim())) ambiguous=true;
-    }
-    if(!matched || ambiguous) return null;
-    return result;
-  }
-  function actualPhrase(actual){ return actionPhrase(actual); }
-
-  function handleActualInput(command){
-    if(awaitingConfirm){
-      if(/^(確認|确认|是|對|对|完成|可以|沒錯|没错)/.test(command)){
-        const actual=pendingActual||emptyActual(); awaitingConfirm=false; awaitingActual=false; pendingActual=null;
-        // 優先直接按下原本的 Streamlit 表單完成鈕，讓畫面原生流程接手。
-        if(clickUiButton(["完成本站並安排下一站"])) {
-          setIndicator("正在完成本站",true);
-        } else {
-          emitAction("confirm_completion", {station_name:currentStation(), ...actual, heard:"確認"});
-          speak("找不到完成按鈕，已改用後端同步");
-        }
-        return true;
-      }
-      if(/取消|重來|重来/.test(command)){ awaitingConfirm=false; awaitingActual=true; pendingActual=null; speak(`${currentStation()}，實際上下多少？`); return true; }
-      return false;
-    }
-    if(awaitingActual){
-      const actual=parseActual(command,true);
-      if(!actual){ speak("我沒有把數量聽清楚。請說：上幾般幾電，或下幾般幾電"); return true; }
-      pendingActual=actual; awaitingActual=false; awaitingConfirm=true;
-      const applied=applyActualToUi(actual);
-      if(applied){
-        setIndicator("畫面已填入，等待確認");
-        speak(`${currentStation()}，${actualPhrase(actual)}，畫面已填入，請確認`);
-      } else {
-        emitAction("fill_actual", {station_name:currentStation(), ...actual, heard:command});
-        speak(`${currentStation()}，${actualPhrase(actual)}，畫面欄位沒有找到，已改用後端同步，請確認`);
-      }
-      return true;
-    }
-    return false;
-  }
-
-  function targetTextFromChange(command){
-    return command.replace(/^(?:幫我)?(?:改往|改去|換去|换去|前往|去)\s*/,"").replace(/[。.!！?？]$/g,"").trim();
-  }
-  function commandHelp(){
-    speak("固定口令：賈維斯分析。賈維斯下一站。賈維斯抵達。要改畫面數字說，賈維斯輸入上一般兩電，或賈維斯輸入下兩般一電。賈維斯完成。賈維斯跳過。賈維斯電池。賈維斯超低電。賈維斯重複。");
-  }
-  function handleTranscript(raw){
-    if(!enabled || speaking) return;
-    const transcript=normalizeSpeechText(raw);
-    if(!transcript) return;
-    const previousHeard=lastHeard;
-    lastHeard=transcript;
-    setIndicator(`聽到｜${transcript.slice(0,18)}`,true);
-
-    // 賈維斯剛主動問「實際上下多少／請確認」時，下一句可直接回答，不必再喊喚醒詞。
-    if(awaitingActual || awaitingConfirm){
-      const followup=wakeVariants(transcript)?stripWake(transcript):normalizeActualText(transcript);
-      if(handleActualInput(followup)) return;
-    }
-
-    const hasWake=wakeVariants(transcript);
-    // V28.7：除「實際上下多少／請確認」的緊接回答外，所有操作都必須完整喊「賈維斯＋口令」。
-    if(!hasWake){ setIndicator(standbyLabel()); return; }
-    const command=stripWake(transcript);
-    if(!command){ speak("我在。請把口令一起說，例如，賈維斯分析"); return; }
-
-    if(/^(?:口令|指令|怎麼說|怎么说|可以說什麼|可以说什么)/.test(command)){ commandHelp(); return; }
-    if(/你聽到什麼|你听到什么|剛剛聽到什麼|刚刚听到什么/.test(command)){ speak(previousHeard?`上一句我聽到，${previousHeard}`:"目前還沒有上一句指令"); return; }
-    if(/^(?:測試|测试|語音測試|语音测试)$/.test(command)){ speak(contextReady()?`語音正常。目前場站，${currentStation()||"尚未鎖定"}`:contextReply()); return; }
-    if(/請?重複|请?重复|再說一次|再说一次|剛剛說什麼|刚刚说什么/.test(command)){ speak(lastSpeech||"目前沒有可重複的內容"); return; }
-    if(/有沒有超低電|有没有超低电|超低電有沒有|超低电有没有|^超低電$|^超低电$/.test(command)){ speakUltra(); return; }
-    if(/電池|电池|低電|低电/.test(command)){ speakBattery(); return; }
-    if(/忘了|忘記|忘记|這裡.*(?:上下|幾台|多少)|这里.*(?:上下|几台|多少)|(?:上下|作業|作业).*(?:多少|幾台|几台)|上多少|下多少|剛剛.*(?:上|下)|刚刚.*(?:上|下)/.test(command)){ if(!contextReady()){speak(contextReply());return;} speak(stationPhrase(currentPlan||(candidates[0]||null))); return; }
-
-    // 會改動表單的語音，優先使用固定口令：「賈維斯，輸入，上1般2電」。
-    const explicitInput=/^(?:麻煩|麻烦)?(?:幫我|帮我)?(?:輸入|输入|填入|填上|設定|设定|記錄|记录)\s*/.test(command);
-    const actualCommand=normalizeActualText(command);
-    if(explicitInput){
-      const actual=parseActual(command,false);
-      if(!actual){
-        speak("數量沒有聽清楚，沒有執行。請說：賈維斯，輸入，上一般兩電。或：賈維斯，輸入，下兩般一電");
-        return;
-      }
-      if(!contextReady()){ speak(contextReply()); return; }
-      const station=currentStation();
-      if(!station){ speak("調度資料更新中，請稍後再說一次"); return; }
-      if(text(args.mode)!=="active"){ speak(`${station}，請先說賈維斯抵達，鎖定場站後再輸入數量`); return; }
-      const phrase=actualPhrase(actual);
-      if(applyActualToUi(actual)){
-        setIndicator("畫面已填入");
-        speak(`${station}，${phrase}，畫面已填入，請確認`);
-      } else if(emitAction("fill_actual", {station_name:station, ...actual, heard:transcript})) {
-        setIndicator("畫面欄位未找到，改用後端同步",true);
-        speak(`${station}，${phrase}，畫面欄位沒有找到，已改用後端同步`);
-      }
-      return;
-    }
-    if(!explicitInput && /[上下]/.test(actualCommand) && /(般|電)/.test(actualCommand)){
-      speak("這是會修改數字的動作。請用固定口令：賈維斯，輸入，上一般兩電。或：賈維斯，輸入，下兩般一電");
-      return;
-    }
-    if(/[上下].*(?:\d+|[一二兩两三四五六七八九十]).*台/.test(actualCommand) && !/(般|電)/.test(actualCommand)){
-      speak("沒有執行。請把車種一起說，例如：賈維斯，輸入，上兩般一電");
-      return;
-    }
-    if(/^(?:清除輸入|清除输入|上下歸零|上下归零)$/.test(command)){
-      if(!contextReady()){speak(contextReply());return;}
-      if(text(args.mode)!=="active"){speak("請先鎖定目標場站");return;}
-      const station=currentStation(); const actual=emptyActual();
-      if(applyActualToUi(actual)){
-        speak(`${station}，上下車數量已在畫面歸零`);
-      } else if(emitAction("fill_actual",{station_name:station,...actual,heard:transcript})) {
-        speak(`${station}，畫面欄位沒有找到，已改用後端同步歸零`);
-      }
-      return;
-    }
-    if(/完成|做完|處理完|处理完/.test(command)){
-      if(!contextReady()){speak(contextReply());return;}
-      if(!currentStation()){speak("目前沒有目標場站");return;}
-      awaitingActual=true; awaitingConfirm=false; pendingActual=null; speak(`${currentStation()}，實際上下多少？`); return;
-    }
-    if(/我到了|已抵達|已抵达|抵達|抵达|到目的地|到站了|我到站|^到了$/.test(command)){
-      if(!contextReady()){speak(contextReply());return;}
-      const station=currentStation(); if(!station){speak("目前沒有目標場站");return;}
-      if(text(args.mode)==="candidate") {
-        if(clickUiButton(["前往此站"])) {
-          setIndicator("正在鎖定場站",true);
-          speak(`${station}，已抵達，畫面正在鎖定場站`);
-        } else {
-          emitAction("lock_station",{station_name:station,heard:transcript});
-          speak(`${station}，已抵達，找不到畫面按鈕，已改用後端鎖定`);
-        }
-      } else speak(`${station}，已抵達`);
-      return;
-    }
-    if(/有人去|有人處理|有人处理|換下一站|换下一站|改往其他|跳過|跳过|不要去/.test(command)){
-      if(!contextReady()){speak(contextReply());return;}
-      const labels=text(args.mode)==="active" ? ["取消配置"] : ["跳過並找下一站"];
-      if(clickUiButton(labels)){
-        setIndicator("正在切換下一站",true);
-      } else {
-        emitAction("skip_current",{station_name:currentStation(),reason:/有人/.test(command)?"有人已前往":"使用者語音改站",heard:transcript});
-      }
-      return;
-    }
-    if(/^(?:改往|改去|換去|换去|前往|去)/.test(command)){
-      if(!contextReady()){speak(contextReply());return;}
-      const target=targetTextFromChange(command); emitAction("change_station",{station_name:currentStation(),target_text:target,heard:transcript}); return;
-    }
-    if(/分析|全部|候選|候选/.test(command)){ speakAnalysis(); return; }
-    if(/下一站|去哪|往哪|該往|该往|前往哪/.test(command)){ speakOne(currentPlan||(candidates[0]||null)); return; }
-    speak(`我聽到，${command}，但沒有執行。你可以說，賈維斯口令，聽可用指令`);
-  }
-
-  function toggleEnabled(){
-    enabled=!enabled; try{win.sessionStorage.setItem(STORAGE_KEY,enabled?"1":"0");}catch(_){}
-    ensureIndicator();
-    if(enabled){ setIndicator(standbyLabel()); startRecognition(); }
-    else { stopRecognition(); win.speechSynthesis.cancel(); setIndicator("賈維斯已關閉"); ensureIndicator().classList.remove("on"); }
-  }
-  win.addEventListener("taitung:jarvis-enabled-change", event=>{
-    enabled=Boolean(event?.detail?.enabled);
-    ensureIndicator();
-    if(enabled){ setIndicator(standbyLabel()); startRecognition(); }
-    else { stopRecognition(); win.speechSynthesis.cancel(); setIndicator("賈維斯已關閉"); ensureIndicator().classList.remove("on"); }
-  });
-  function hydrate(){
-    currentPlan=args.current_plan&&typeof args.current_plan==="object"?args.current_plan:null;
-    candidates=Array.isArray(args.candidates)?args.candidates:[];
-    contextStatus=text(args.context_status||"updating").toLowerCase();
-    contextMessage=text(args.context_message||"");
-    try{enabled=win.sessionStorage.getItem(STORAGE_KEY)==="1";}catch(_){enabled=false;}
-    ensureIndicator(); if(enabled){ setIndicator(standbyLabel()); startRecognition(); }
-    const token=text(args.auto_announce_token);
-    if(enabled && contextReady() && args.auto_announce && token && token!==lastAutoAnnounceToken){ lastAutoAnnounceToken=token; win.setTimeout(()=>speakOne(currentPlan||(candidates[0]||null)),450); }
-    setHeight();
-  }
-
-  win.addEventListener("message", event=>{
-    if(!event.data || event.data.type!=="streamlit:render") return;
-    args=event.data.args||{}; hydrate();
-  });
-  send("streamlit:componentReady",{apiVersion:API_VERSION}); setHeight();
-})();
-</script></body></html>'''
-
-_JARVIS_VOICE_COMPONENT = None
 
 
-def get_jarvis_voice_component():
-    """建立隱藏式賈維斯語音元件；由「測試版」單擊切換啟用狀態。"""
-    global _JARVIS_VOICE_COMPONENT
-    if _JARVIS_VOICE_COMPONENT is not None:
-        return _JARVIS_VOICE_COMPONENT
-    component_dir = Path(tempfile.gettempdir()) / "taitung_jarvis_voice_component_v7"
-    component_dir.mkdir(parents=True, exist_ok=True)
-    index_path = component_dir / "index.html"
-    content = JARVIS_BROWSER_COMPONENT_HTML.replace("__LOW_BATTERY_CLIENT_CORE__", LOW_BATTERY_CLIENT_CORE_JS)
-    try:
-        if not index_path.exists() or index_path.read_text(encoding="utf-8") != content:
-            index_path.write_text(content, encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError(f"無法建立賈維斯語音元件：{exc}") from exc
-    _JARVIS_VOICE_COMPONENT = components.declare_component("taitung_jarvis_voice_v5", path=str(component_dir))
-    return _JARVIS_VOICE_COMPONENT
+
 
 
 
@@ -9346,127 +8529,10 @@ def dispatch_action_text(plan: dict) -> str:
     return "｜".join(parts) if parts else "無可行調度"
 
 
-def jarvis_plan_payload(plan: dict | None) -> dict:
-    """把智慧調度已算好的必要 context 提供給賈維斯，不重送整張 DataFrame。
-
-    V28.6 延續既有執行中資料，不要求配置表新增欄位。這份 payload 之後可直接
-    作為真正 GPT／Realtime 助理的候選場站 context。
-    """
-    if not isinstance(plan, dict):
-        return {}
-    keys = (
-        # 場站身分／區域
-        "station_name", "station_id", "official_name", "region", "route_zone",
-        "latitude", "longitude",
-        # 場站現況與配置
-        "current_bike", "current_ebike", "standard_bike", "standard_ebike",
-        "total_bikes", "empty_spaces", "parking_spaces", "service_status",
-        # 本站建議作業
-        "unload_bike", "unload_ebike", "pickup_bike", "pickup_ebike", "dispatch_count",
-        # 貨車作業前後載量
-        "truck_before_bike", "truck_before_ebike", "truck_after_bike", "truck_after_ebike",
-        "max_capacity",
-        # GPS／道路路網衍生結果
-        "straight_distance_km", "estimated_distance_km", "estimated_drive_minutes",
-        "estimated_operation_minutes", "estimated_total_minutes", "road_detour_ratio",
-        "routing_source", "routing_fallback", "road_route_available", "routing_data_version",
-        # 排名與特殊規則
-        "raw_efficiency", "score", "inventory_station", "inventory_attention",
-    )
-    return {key: plan.get(key) for key in keys if key in plan}
 
 
-def render_jarvis_voice_assistant(
-    *,
-    dispatch_prefix: str,
-    mode: str,
-    candidates: list[dict],
-    current_plan: dict | None,
-    threshold: int,
-    priority_threshold: int,
-    auto_announce: bool = False,
-    context_status: str = "ready",
-    context_message: str = "",
-) -> dict | None:
-    """渲染隱藏式語音助理，並以 Streamlit session state 保存調度 context。
-
-    V28.5 起瀏覽器不再自行保存 120 秒候選資料。ready 狀態由 Python 寫入
-    session state；短暫 rerun／定位更新時可沿用最後一份快照，但語音會先提示更新中。
-    """
-    if mode not in {"candidate", "active"}:
-        return None
-
-    server_context_key = f"{dispatch_prefix}::jarvis_server_context_v1"
-    status = str(context_status or "ready").strip().lower()
-    incoming_candidates = [
-        jarvis_plan_payload(plan)
-        for plan in candidates[:SMART_DISPATCH_CANDIDATE_LIMIT]
-        if isinstance(plan, dict)
-    ]
-    incoming_plan = jarvis_plan_payload(current_plan)
-    has_incoming_station = bool(str(incoming_plan.get("station_name") or "").strip()) or any(
-        bool(str(plan.get("station_name") or "").strip()) for plan in incoming_candidates
-    )
-
-    if status == "ready" and has_incoming_station:
-        snapshot = {
-            "mode": mode,
-            "current_plan": incoming_plan,
-            "candidates": incoming_candidates,
-            "updated_at": time.time(),
-        }
-        st.session_state[server_context_key] = snapshot
-    elif status in {"no_candidates", "blocked", "unavailable"}:
-        # 這些是已確認的終態，不應沿用舊目標。
-        st.session_state.pop(server_context_key, None)
-    elif status == "updating" and not has_incoming_station:
-        # rerun / GPS / 即時車數更新期間保留最後一份伺服器快照，
-        # 但前端會依 context_status 阻止使用者誤用舊資料。
-        saved = st.session_state.get(server_context_key)
-        if isinstance(saved, dict):
-            saved_plan = saved.get("current_plan")
-            saved_candidates = saved.get("candidates")
-            if isinstance(saved_plan, dict):
-                incoming_plan = dict(saved_plan)
-            if isinstance(saved_candidates, list):
-                incoming_candidates = [dict(item) for item in saved_candidates if isinstance(item, dict)]
-
-    try:
-        component = get_jarvis_voice_component()
-        payload = component(
-            key=f"jarvis_voice::{dispatch_prefix}",
-            default=None,
-            mode=mode,
-            app_version=APP_VERSION,
-            context_schema_version=5,
-            context_status=status,
-            context_message=str(context_message or "").strip(),
-            candidate_count=min(len(incoming_candidates), SMART_DISPATCH_CANDIDATE_LIMIT),
-            candidates=incoming_candidates,
-            current_plan=incoming_plan,
-            threshold=min(100, max(0, int(threshold))),
-            priority_threshold=min(int(threshold), max(0, int(priority_threshold))),
-            auto_announce=bool(auto_announce and status == "ready"),
-            auto_announce_token=uuid.uuid4().hex if auto_announce and status == "ready" else "",
-        )
-        return payload if isinstance(payload, dict) else None
-    except Exception as exc:
-        # 語音是測試外掛，任何失敗都不能拖垮原 v27.5 調度流程。
-        st.caption(f"賈維斯語音測試元件未啟用：{exc}")
-        return None
 
 
-def resolve_voice_station_name(status_df: pd.DataFrame, target_text: str) -> str:
-    """把語音中的場站名稱安全對到目前配置表；先精確，再做唯一包含比對。"""
-    wanted = normalize_station_key(target_text)
-    if not wanted or "場站名稱" not in status_df.columns:
-        return ""
-    names = [str(name).strip() for name in status_df["場站名稱"].dropna().astype(str).drop_duplicates()]
-    exact = [name for name in names if normalize_station_key(name) == wanted]
-    if len(exact) == 1:
-        return exact[0]
-    partial = [name for name in names if wanted in normalize_station_key(name) or normalize_station_key(name) in wanted]
-    return partial[0] if len(partial) == 1 else ""
 
 
 def _dispatch_truck_before_counts(plan: dict) -> tuple[int, int]:
@@ -9788,8 +8854,6 @@ def render_smart_dispatch(
     loop_order_key = f"{dispatch_prefix}::loop_zone_order"
     loop_phase_key = f"{dispatch_prefix}::loop_active_phase"
     battery_force_refresh_key = f"{dispatch_prefix}::battery_force_refresh_station"
-    jarvis_processed_event_key = f"{dispatch_prefix}::jarvis_processed_event"
-    jarvis_auto_announce_key = f"{dispatch_prefix}::jarvis_auto_announce"
     battery_threshold, battery_priority_threshold = get_low_battery_thresholds(
         active_base["token"]
     )
@@ -9896,12 +8960,6 @@ def render_smart_dispatch(
         st.error(
             f"目前車上合計 {total_on_truck} 台，已超過最高載量 {max_capacity} 台。請先修正數量，系統不會安排路線。"
         )
-        if trip_mode == "一般模式":
-            render_jarvis_voice_assistant(
-                dispatch_prefix=dispatch_prefix, mode="candidate", candidates=[], current_plan=None,
-                threshold=battery_threshold, priority_threshold=battery_priority_threshold,
-                context_status="blocked", context_message="目前貨車載量超過上限，請先修正車上數量",
-            )
         return
 
     shared_location_mode = require_external_location or fallback_location is not None or external_location is not None
@@ -9953,12 +9011,6 @@ def render_smart_dispatch(
     location_request_pending = bool(st.session_state.get(location_request_pending_key, False))
     if location_request_pending and not shared_location_mode:
         st.info("正在讀取取消配置後的目前位置；定位完成後會自動重新安排下一個場站。")
-        if trip_mode == "一般模式":
-            render_jarvis_voice_assistant(
-                dispatch_prefix=dispatch_prefix, mode="candidate", candidates=[], current_plan=None,
-                threshold=battery_threshold, priority_threshold=battery_priority_threshold,
-                context_status="updating", context_message="正在更新目前位置，請稍後再說一次",
-            )
         return
     if isinstance(current_location, dict):
         source_lookup = {
@@ -9975,12 +9027,6 @@ def render_smart_dispatch(
         )
     else:
         st.info("尚未取得有效位置，系統無法把距離與行車時間納入下一站評估。")
-        if trip_mode == "一般模式":
-            render_jarvis_voice_assistant(
-                dispatch_prefix=dispatch_prefix, mode="candidate", candidates=[], current_plan=None,
-                threshold=battery_threshold, priority_threshold=battery_priority_threshold,
-                context_status="updating", context_message="尚未取得有效 GPS 位置，正在等待定位",
-            )
         return
 
     metadata = status_cache.get("metadata", {}).get(current_context_key, {})
@@ -9991,12 +9037,6 @@ def render_smart_dispatch(
     )
     if not isinstance(station_locations, dict) or not station_locations:
         st.info("尚未取得場站官方座標。請先在上方執行一次「高速取得全部 YouBike 場站車數」。")
-        if trip_mode == "一般模式":
-            render_jarvis_voice_assistant(
-                dispatch_prefix=dispatch_prefix, mode="candidate", candidates=[], current_plan=None,
-                threshold=battery_threshold, priority_threshold=battery_priority_threshold,
-                context_status="updating", context_message="場站座標資料尚未完成，請稍後再說一次",
-            )
         return
 
 
@@ -10081,48 +9121,6 @@ def render_smart_dispatch(
         st.markdown(f"[🧭 開啟 Google Maps 導航](https://www.google.com/maps/dir/?{maps_query})")
         st.info("到場作業後，可依現場變數修改實際上下車數量；只有按下完成本站，系統才會安排下一站。")
 
-        voice_completion_values: dict | None = None
-        voice_cancel_requested = False
-        voice_next_station = ""
-        if trip_mode == "一般模式":
-            voice_event = render_jarvis_voice_assistant(
-                dispatch_prefix=dispatch_prefix,
-                mode="active",
-                candidates=[active_trip],
-                current_plan=active_trip,
-                threshold=battery_threshold,
-                priority_threshold=battery_priority_threshold,
-                auto_announce=False,
-            )
-            if isinstance(voice_event, dict):
-                event_id = str(voice_event.get("event_id") or "").strip()
-                if event_id and st.session_state.get(jarvis_processed_event_key) != event_id:
-                    st.session_state[jarvis_processed_event_key] = event_id
-                    event_type = str(voice_event.get("type") or "").strip()
-                    if event_type == "fill_actual":
-                        fill_values = {
-                            "unload_bike": safe_nonnegative_int(voice_event.get("unload_bike")),
-                            "unload_ebike": safe_nonnegative_int(voice_event.get("unload_ebike")),
-                            "pickup_bike": safe_nonnegative_int(voice_event.get("pickup_bike")),
-                            "pickup_ebike": safe_nonnegative_int(voice_event.get("pickup_ebike")),
-                        }
-                        st.session_state[f"{dispatch_prefix}::actual_unload_bike::{trip_id}"] = fill_values["unload_bike"]
-                        st.session_state[f"{dispatch_prefix}::actual_unload_ebike::{trip_id}"] = fill_values["unload_ebike"]
-                        st.session_state[f"{dispatch_prefix}::actual_pickup_bike::{trip_id}"] = fill_values["pickup_bike"]
-                        st.session_state[f"{dispatch_prefix}::actual_pickup_ebike::{trip_id}"] = fill_values["pickup_ebike"]
-                    elif event_type == "confirm_completion":
-                        voice_completion_values = {
-                            "unload_bike": safe_nonnegative_int(voice_event.get("unload_bike")),
-                            "unload_ebike": safe_nonnegative_int(voice_event.get("unload_ebike")),
-                            "pickup_bike": safe_nonnegative_int(voice_event.get("pickup_bike")),
-                            "pickup_ebike": safe_nonnegative_int(voice_event.get("pickup_ebike")),
-                        }
-                    elif event_type in {"skip_current", "change_station"}:
-                        voice_cancel_requested = True
-                        if event_type == "change_station":
-                            voice_next_station = resolve_voice_station_name(
-                                full_status_df, str(voice_event.get("target_text") or "")
-                            )
 
         with st.expander("現場變數／修改實際上下車數量", expanded=True):
             with st.form(key=f"{dispatch_prefix}::complete_trip_form::{trip_id}", clear_on_submit=False):
@@ -10168,14 +9166,6 @@ def render_smart_dispatch(
                     use_container_width=True,
                 )
 
-            if voice_completion_values is not None:
-                actual_unload_bike = safe_nonnegative_int(voice_completion_values.get("unload_bike"))
-                actual_unload_ebike = safe_nonnegative_int(voice_completion_values.get("unload_ebike"))
-                actual_pickup_bike = safe_nonnegative_int(voice_completion_values.get("pickup_bike"))
-                actual_pickup_ebike = safe_nonnegative_int(voice_completion_values.get("pickup_ebike"))
-                completed = True
-            if voice_cancel_requested:
-                cancelled = True
 
             if cancelled:
                 cancelled_at = time.time()
@@ -10200,9 +9190,6 @@ def render_smart_dispatch(
                 st.session_state[history_key] = history[-100:]
                 st.session_state.pop(active_trip_key, None)
                 st.session_state.pop(manual_station_key, None)
-                if voice_next_station:
-                    st.session_state[manual_station_key] = voice_next_station
-                st.session_state[jarvis_auto_announce_key] = True
                 if shared_location_mode:
                     st.session_state.pop(location_state_key, None)
                 else:
@@ -10296,7 +9283,6 @@ def render_smart_dispatch(
                         st.session_state[dispatch_round_key] = current_round + 1
                         st.session_state.pop(active_trip_key, None)
                         st.session_state.pop(manual_station_key, None)
-                        st.session_state[jarvis_auto_announce_key] = True
                         rerun_app()
         render_dispatch_auxiliary_panels(
             dispatch_prefix=dispatch_prefix,
@@ -10460,23 +9446,6 @@ def render_smart_dispatch(
             now_timestamp=now_timestamp,
             current_round=current_round,
         )
-        if trip_mode == "一般模式":
-            road_status = st.session_state.get(ROAD_ROUTER_STATUS_STATE_KEY, {})
-            road_failed = isinstance(road_status, dict) and road_status.get("ok") is False
-            render_jarvis_voice_assistant(
-                dispatch_prefix=dispatch_prefix,
-                mode="candidate",
-                candidates=[],
-                current_plan=None,
-                threshold=battery_threshold,
-                priority_threshold=battery_priority_threshold,
-                context_status="unavailable" if road_failed else "no_candidates",
-                context_message=(
-                    "道路路網服務暫時無法使用，請稍後更新重新計算"
-                    if road_failed else
-                    "目前沒有可執行場站"
-                ),
-            )
         return
 
     if show_route_preview and len(candidates) > 1:
@@ -10511,55 +9480,6 @@ def render_smart_dispatch(
         candidates[0],
     )
 
-    voice_rejected = False
-    if trip_mode == "一般模式":
-        auto_announce = bool(st.session_state.pop(jarvis_auto_announce_key, False))
-        voice_event = render_jarvis_voice_assistant(
-            dispatch_prefix=dispatch_prefix,
-            mode="candidate",
-            candidates=candidates[:SMART_DISPATCH_CANDIDATE_LIMIT],
-            current_plan=recommended,
-            threshold=battery_threshold,
-            priority_threshold=battery_priority_threshold,
-            auto_announce=auto_announce,
-        )
-        if isinstance(voice_event, dict):
-            event_id = str(voice_event.get("event_id") or "").strip()
-            if event_id and st.session_state.get(jarvis_processed_event_key) != event_id:
-                st.session_state[jarvis_processed_event_key] = event_id
-                event_type = str(voice_event.get("type") or "").strip()
-                if event_type == "lock_station":
-                    locked_station = str(voice_event.get("station_name") or recommended.get("station_name") or "").strip()
-                    locked_candidate = next(
-                        (candidate for candidate in candidates if str(candidate.get("station_name")) == locked_station),
-                        recommended,
-                    )
-                    locked_trip = dict(locked_candidate)
-                    locked_trip["trip_id"] = uuid.uuid4().hex
-                    locked_trip["accepted_at"] = time.time()
-                    st.session_state[active_trip_key] = locked_trip
-                    st.session_state[battery_force_refresh_key] = str(locked_trip.get("station_name") or "").strip()
-                    rerun_app()
-                elif event_type == "skip_current":
-                    voice_rejected = True
-                elif event_type == "change_station":
-                    target_station = resolve_voice_station_name(
-                        dispatch_df, str(voice_event.get("target_text") or "")
-                    )
-                    target_candidate = next(
-                        (candidate for candidate in candidates if str(candidate.get("station_name")) == target_station),
-                        None,
-                    )
-                    if target_candidate is not None:
-                        if target_station == str(candidates[0].get("station_name") or ""):
-                            st.session_state.pop(manual_station_key, None)
-                        else:
-                            st.session_state[manual_station_key] = target_station
-                        st.session_state[battery_force_refresh_key] = target_station
-                        st.session_state[jarvis_auto_announce_key] = True
-                        rerun_app()
-                    else:
-                        voice_rejected = True
 
     recommendation_title = "使用者指定下一站" if manual_station_name else "下一站最高效益推薦"
     render_dispatch_plan_card(recommended, title=recommendation_title)
@@ -10800,8 +9720,6 @@ def render_smart_dispatch(
             key=f"{dispatch_prefix}::skip_recommendation",
         )
 
-    if voice_rejected:
-        rejected = True
 
     if accepted:
         locked_trip = dict(recommended)
@@ -10841,7 +9759,6 @@ def render_smart_dispatch(
         )
         st.session_state[history_key] = history[-100:]
         st.session_state.pop(manual_station_key, None)
-        st.session_state[jarvis_auto_announce_key] = True
         rerun_app()
 
     render_dispatch_auxiliary_panels(
@@ -11450,7 +10367,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 render_app_hero()
-render_jarvis_trigger_bootstrap()
 
 mobile_mode = is_mobile_browser()
 
