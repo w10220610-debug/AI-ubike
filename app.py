@@ -40,6 +40,10 @@ import streamlit as st
 
 from battery_icon_data import BATTERY_ICON_DATA_URI
 from battery_upgrade import render_floating_server_battery as _render_floating_server_battery
+from work_orders import (
+    pending as work_order_pending, pending_names as work_order_names,
+    badge_html as work_order_badge, render_manager as render_work_order_manager,
+)
 from performance_cache import compile_legacy_source
 from streamlit_component_compat import install_component_declare_compat
 
@@ -312,11 +316,12 @@ def _save_priority_state(
 
 def _priority_pending_names(status_cache: dict, selected_shift: str = "") -> list[str]:
     bucket = _priority_bucket(status_cache, selected_shift, create=False)
-    return [
+    manual = [
         str(item.get("station_name") or "").strip()
         for item in bucket.get("pending", [])
         if isinstance(item, dict) and str(item.get("station_name") or "").strip()
     ]
+    return list(dict.fromkeys(manual + work_order_names(status_cache)))
 
 
 def priority_station_rank(
@@ -851,6 +856,13 @@ replace_exact(
 
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
+
+**2026/10/03｜派工照片匯入與跨頁待辦（試用）**
+- 新增多張照片／拍照辨識、貼上文字、批次核對場站與設備編號後匯入，重複派工不重建。
+- 派工在一般分析與智慧調度共用，未完成項目跨班保留；逐筆完成、暫緩及復原，獨立於人工優先場站。
+- 一般分析新增「只看未完成派工」，場站表格標示派工；智慧調度納入僅有派工而不需補收車的場站，仍檢查現況、座標及道路可行性。
+- 辨識僅在按下按鈕時執行；提供同一瀏覽器備份與 JSON 匯出還原。清除瀏覽器資料或更換裝置前請匯出。
+- 本次為一項功能更新，依每五次功能更新升一代規則計數；本系統完成紀錄不會回報上級平台。
 
 **2026/09/30｜運行修復**
 - 修復主頁等待即時車數與電池站號查詢而持續轉圈；細節見左側「BUG修復內容」。本次屬 BUG 修復，不累計功能升版次數。
@@ -1505,6 +1517,10 @@ if page_mode == "智慧調度":''',
     alerts=station_alerts,
 )
 
+render_work_order_manager(
+    base_df, cache=status_cache, token=active_base["token"], page_mode=page_mode,
+    save=lambda: save_cached_status(active_base["token"], None, status_cache),
+)
 priority_station_ui = render_priority_station_manager(
     base_df,
     status_cache=status_cache,
@@ -1550,8 +1566,11 @@ replace_exact(
         for name in priority_pending_names
     }
 
-    if priority_only:
-        st.info("🚨 目前僅顯示本班尚未完成的優先場站。")
+    work_order_only = bool(st.session_state.get(f"work_orders::{active_base_token}::only", False))
+    if work_order_only:
+        priority_pending_keys = {_priority_station_key(n) for n in work_order_names(status_cache)}
+    if priority_only or work_order_only:
+        st.info("🟣 目前僅顯示未完成派工場站。" if work_order_only else "🚨 目前僅顯示尚未完成的優先場站。")
         priority_detail_df = build_analysis_result(all_status_df)
         if priority_pending_keys:
             priority_detail_df = priority_detail_df[
@@ -1580,6 +1599,15 @@ replace_exact(
         )
         return
 
+    work_keys = {_priority_station_key(n) for n in work_order_names(status_cache)}
+    if priority_pin and work_keys:
+        work_df = build_analysis_result(all_status_df)
+        work_df = work_df[work_df["場站名稱"].astype(str).map(_priority_station_key).isin(work_keys)]
+        if not work_df.empty:
+            st.markdown("##### 🟣 未完成派工場站")
+            render_analysis_result_table(work_df)
+            result_df = result_df[~result_df["場站名稱"].astype(str).map(_priority_station_key).isin(work_keys)].reset_index(drop=True)
+    priority_pending_keys -= work_keys
     if priority_pin and priority_pending_keys and not result_df.empty:
         result_df = result_df[
             ~result_df["場站名稱"].astype(str).map(
@@ -1696,6 +1724,45 @@ def _modernize_legacy_iframes(legacy_source: str) -> str:
     modern = modern.replace(", scrolling=False", "")
     return modern
 
+
+# Work orders are independent of truck movements and manual priority completion.
+replace_exact(
+    "    if dispatch_count <= 0:\n        return None",
+    "    if dispatch_count <= 0 and not work_order_pending(status_cache, row.get('場站名稱')):\n        return None",
+    label="allow work order only station plans",
+)
+replace_exact(
+    '            if not plan["inventory_attention"]:\n                continue',
+    '            if not plan["inventory_attention"] and not work_order_pending(status_cache, station_name):\n                continue',
+    label="inventory station assigned work",
+)
+replace_exact(
+    '    station_name_attr = html.escape(station_name, quote=True)\n',
+    '    station_name_attr = html.escape(station_name, quote=True)\n    st.markdown(work_order_badge(status_cache, station_name), unsafe_allow_html=True)\n',
+    label="smart plan work order badge",
+)
+# Cached HTML includes badge text in the cache arguments, so completion invalidates it.
+replace_exact(
+    'def _build_analysis_result_table_html(rows: tuple[tuple, ...]) -> str:',
+    'def _build_analysis_result_table_html(rows: tuple[tuple, ...], work_badges: tuple = ()) -> str:',
+    label="analysis work badge cache key",
+)
+replace_exact(
+    '        station_name = html.escape(str(station_name_raw))',
+    '        station_name = html.escape(str(station_name_raw)) + dict(work_badges).get(str(station_name_raw), "")',
+    label="analysis work order badge",
+)
+
+replace_exact(
+    '    st.markdown(_build_analysis_result_table_html(tuple(rows)), unsafe_allow_html=True)',
+    '    work_badges = tuple((str(n), work_order_badge(status_cache, str(n))) for n in display_df["場站名稱"])\n    st.markdown(_build_analysis_result_table_html(tuple(rows), work_badges), unsafe_allow_html=True)',
+    label="analysis badge snapshot",
+)
+replace_exact(
+    '    return "｜".join(parts) if parts else "無可行調度"',
+    '    tasks = work_order_pending(status_cache, plan.get("station_name"))\n    if tasks:\n        parts.append(f"🟣 派工 {len(tasks)} 件（請逐筆確認完成）")\n    return "｜".join(parts) if parts else "無可行調度"',
+    label="dispatch work action text",
+)
 
 source = _modernize_legacy_iframes(source)
 exec(compile_legacy_source(source, str(LEGACY_APP)), globals(), globals())

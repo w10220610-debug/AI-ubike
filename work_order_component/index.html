@@ -1,0 +1,38 @@
+<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{font:14px system-ui,sans-serif;color:#64748b;margin:4px}button{background:#7c3aed;color:white;border:0;border-radius:8px;padding:10px;margin:8px 8px 6px 0;cursor:pointer}input{max-width:100%}button:disabled{opacity:.5}#status{white-space:pre-wrap;font-size:13px}label{display:block;margin:8px 0}
+</style><label>選擇派工照片／截圖（可多選）<input id="files" type="file" accept="image/jpeg,image/png,image/webp" multiple></label><label>直接拍照<input id="camera" type="file" accept="image/*" capture="environment"></label><details><summary>裁切／文字增強（拍螢幕時建議使用）</summary><label>保留起點 <input id="cropTop" type="range" min="0" max="90" value="0"></label><label>保留終點 <input id="cropBottom" type="range" min="10" max="100" value="100"></label><label><input id="enhance" type="checkbox" checked> 增強文字對比</label><small>預覽第一張；裁切設定會套用本次所有照片。</small><canvas id="preview" style="display:block;max-width:100%;max-height:200px"></canvas></details><button id="start">辨識照片</button><button id="cancel" disabled>取消</button><div id="status">首次辨識需下載繁體中文辨識資料。建議裁切派工表格、保持文字清楚。</div>
+<script>
+const files=document.getElementById('files'),camera=document.getElementById('camera'),start=document.getElementById('start'),cancel=document.getElementById('cancel'),status=document.getElementById('status');
+let worker=null,generation=0,restoreSent=false,token='';
+function send(type,extra={}){parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
+function value(data){send('streamlit:setComponentValue',{value:{...data,event_id:Date.now()+'-'+Math.random()},dataType:'json'})}
+function resize(){send('streamlit:setFrameHeight',{height:document.body.scrollHeight+16})}
+function report(s){status.textContent=s;resize()}
+addEventListener('message',e=>{if(e.source!==parent||e.data.type!=='streamlit:render')return;
+ const a=e.data.args;token=a.token;
+ try{const key='ubike:work-orders:'+token;const saved=JSON.parse(localStorage.getItem(key)||'[]');const remote=a.snapshot||[];
+ const byId=new Map(remote.map(x=>[x.id,x]));let newer=false;
+ for(const x of saved){const old=byId.get(x.id);if(!old||Number(x.updated_at)>Number(old.updated_at)){byId.set(x.id,x);newer=true}}
+ if(newer&&!restoreSent){restoreSent=true;value({type:'restore',orders:[...byId.values()]})}
+ else if(!newer){localStorage.setItem(key,JSON.stringify(remote));restoreSent=false}
+ }catch(_){report('瀏覽器備份不可用，請使用「匯出派工紀錄」保留紀錄。')}
+ resize();});
+function loadOCR(){if(window.Tesseract)return Promise.resolve();return new Promise((resolve,reject)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';s.onload=resolve;s.onerror=()=>{s.remove();reject(Error('辨識套件下載失敗，請檢查網路或改貼派工文字。'))};document.head.appendChild(s)})}
+const cropTop=document.getElementById('cropTop'),cropBottom=document.getElementById('cropBottom'),enhance=document.getElementById('enhance');
+async function canvasFor(file){const url=URL.createObjectURL(file);try{const img=new Image();img.src=url;await img.decode();const top=Number(cropTop.value)/100,bottom=Number(cropBottom.value)/100;if(bottom<=top)throw Error('裁切終點必須大於起點');const h=img.height*(bottom-top);const scale=Math.min(2,3200/Math.max(img.width,h));const c=document.createElement('canvas');c.width=Math.round(img.width*scale);c.height=Math.round(h*scale);const ctx=c.getContext('2d');ctx.drawImage(img,0,img.height*top,img.width,h,0,0,c.width,c.height);if(enhance.checked){const data=ctx.getImageData(0,0,c.width,c.height),d=data.data,hist=new Uint32Array(256);for(let i=0;i<d.length;i+=4){const v=Math.round(.299*d[i]+.587*d[i+1]+.114*d[i+2]);d[i]=d[i+1]=d[i+2]=v;hist[v]++}const n=d.length/4;let lo=0,hi=255,sum=0;while(lo<254&&sum<n*.01)sum+=hist[lo++];sum=0;while(hi>lo+1&&sum<n*.01)sum+=hist[hi--];for(let i=0;i<d.length;i+=4){const v=Math.max(0,Math.min(255,((d[i]-lo)*255/(hi-lo)-128)*1.5+128));d[i]=d[i+1]=d[i+2]=v}ctx.putImageData(data,0,0)}return c}finally{URL.revokeObjectURL(url)}}
+async function preview(){try{const file=files.files[0]||camera.files[0];if(!file)return;const c=await canvasFor(file),p=document.getElementById('preview');p.width=c.width;p.height=c.height;p.getContext('2d').drawImage(c,0,0);resize()}catch(e){report(e.message)}}
+camera.onchange=()=>{files.value='';preview()};files.onchange=()=>{camera.value='';preview()};cropTop.oninput=cropBottom.oninput=enhance.onchange=preview;document.querySelector('details').ontoggle=resize;
+cancel.onclick=()=>{generation++;if(worker){worker.terminate();worker=null}start.disabled=false;cancel.disabled=true;report('已取消，可重新選照片。')};
+start.onclick=async()=>{const selected=[...files.files,...camera.files];if(!selected.length){report('請先選擇照片。');return}if(selected.length>10||selected.some(f=>f.size>15*1024*1024)){report('一次最多 10 張，每張上限 15 MB。');return}
+ const run=++generation;start.disabled=true;cancel.disabled=false;let timeout;
+ try{timeout=setTimeout(()=>{if(run===generation){cancel.onclick();report('辨識逾時，請裁切較小的表格後重試，或貼上派工文字。')}},180000);await loadOCR();if(run!==generation)return;
+ const createdWorker=await Tesseract.createWorker(['chi_tra','eng'],1,{logger:m=>{if(run===generation)report('辨識中 '+Math.round((m.progress||0)*100)+'%')}});
+ if(run!==generation){await createdWorker.terminate();return}
+ worker=createdWorker;
+ await worker.setParameters({tessedit_pageseg_mode:'6',preserve_interword_spaces:'1'});
+ const texts=[];for(let i=0;i<selected.length;i++){report(`處理第 ${i+1}/${selected.length} 張…`);const canvas=await canvasFor(selected[i]);if(run!==generation)return;const result=await worker.recognize(canvas);texts.push(result.data.text);canvas.width=canvas.height=1;if(run!==generation)return}
+ value({type:'ocr',text:texts.join('\n')});report('辨識完成，請在下方核對場站、設備編號與派工時間，再確認加入。');
+ }catch(e){if(run===generation)report('辨識未完成：'+e.message+' 可改貼派工文字。')}
+ finally{clearTimeout(timeout);if(run===generation){if(worker)await worker.terminate();worker=null;start.disabled=false;cancel.disabled=true;resize()}}};
+send('streamlit:componentReady',{apiVersion:1});resize();
+</script></html>
