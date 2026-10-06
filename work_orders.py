@@ -139,6 +139,36 @@ def lookup_draft(matches, names, kind):
     return output
 
 
+def apply_lookup_to_draft(draft, matches, names, kind):
+    """Fill current parsed rows by exact bike number; append vehicle-only rows."""
+    base = [dict(row) for row in draft] if isinstance(draft, list) else []
+    found_rows = lookup_draft(matches, names, kind)
+    by_bike = {}
+    for index, row in enumerate(base):
+        bike = str(row.get('equipment') or '').strip()
+        if re.fullmatch(r'[0-9]{6,10}', bike):
+            by_bike.setdefault(bike, []).append(index)
+
+    for found in found_rows:
+        bike = found['equipment']
+        indexes = by_bike.get(bike, [])
+        if indexes:
+            for index in indexes:
+                row = base[index]
+                row['station_name'] = found['station_name']
+                if not str(row.get('kind') or '').strip():
+                    row['kind'] = found['kind']
+                detail = found['description']
+                current = str(row.get('description') or '').strip()
+                if detail and detail not in current:
+                    row['description'] = (current + '；' + detail).strip('；')
+                row['selected'] = True
+        else:
+            base.append(found)
+            by_bike[bike] = [len(base) - 1]
+    return base
+
+
 def lookup_station_args(route_station_map):
     # Reuse the battery map's bounded background job; never wait for network in the UI.
     from battery_upgrade import _clean_route_map, _load_station_map, _monitor_station_map
@@ -164,7 +194,18 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
     with st.expander(f'🟣 派工待辦｜{len(pending(cache))} 件未完成', expanded=False):
         st.caption('拍照／多張截圖 → 辨識 → 核對後一次加入。派工完成只記錄於本系統。')
         epoch = st.session_state.get(prefix + '::reset_epoch', 0)
+        current_draft = st.session_state.get(prefix + '::draft')
+        prefill_bike_numbers = []
+        if isinstance(current_draft, list):
+            prefill_bike_numbers = list(dict.fromkeys(
+                str(row.get('equipment') or '').strip()
+                for row in current_draft
+                if isinstance(row, dict)
+                and not str(row.get('station_name') or '').strip()
+                and re.fullmatch(r'[0-9]{6,10}', str(row.get('equipment') or '').strip())
+            ))
         event = component(token=token, snapshot=orders(cache), reset_epoch=epoch,
+                          prefill_bike_numbers=prefill_bike_numbers,
                           **lookup_station_args(route_station_map or {}),
                           key=prefix + '::ocr', default=None)
         if isinstance(event, dict) and event.get('event_id') != st.session_state.get(prefix + '::event'):
@@ -174,7 +215,12 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                     save()
                     st.rerun()
             elif event.get('type') == 'lookup' and event.get('reset_epoch') == epoch:
-                st.session_state[prefix + '::draft'] = lookup_draft(event.get('matches'), names, event.get('kind'))
+                st.session_state[prefix + '::draft'] = apply_lookup_to_draft(
+                    st.session_state.get(prefix + '::draft'),
+                    event.get('matches'),
+                    names,
+                    event.get('kind'),
+                )
                 st.session_state[prefix + '::draft_version'] = str(event.get('event_id'))
             elif event.get('type') == 'ocr' and event.get('reset_epoch') == epoch:
                 st.session_state[prefix + '::text'] = str(event.get('text') or '')[:100000]
