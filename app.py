@@ -857,6 +857,12 @@ replace_exact(
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
 
+**2026/10/06｜車號找車與派工清理**
+- 派工新增完整車號批次搜尋，按下查詢才搜尋目前配置範圍，顯示場站、柱號、電量與查詢時間，核對後可加入派工。
+- 使用既有站上車輛 API；不保證涵蓋一般車、借出或離站車輛。查詢逾時、失敗、未配對及未查完會分開提示，不當成查無車輛。
+- 新增「清除輸入／重新開始」，以及已加入待辦的「移除誤加派工」。
+- 車號查詢計為一項功能更新；維持每五次功能更新升一代，清理修復不另計。
+
 **2026/10/03｜派工照片匯入與跨頁待辦（試用）**
 - 新增多張照片／拍照辨識、貼上文字、批次核對場站與設備編號後匯入，重複派工不重建。
 - 派工在一般分析與智慧調度共用，未完成項目跨班保留；逐筆完成、暫緩及復原，獨立於人工優先場站。
@@ -919,6 +925,10 @@ replace_exact(
 _BUG_FIX_CONTENT_MD = """
 #### 🐞 BUG 修復紀錄
 > 僅記錄已實際完成的修復；單純新增功能不列入。
+
+**2026/10/06｜派工輸入失敗後無法清除**
+- 清除會重設照片、裁切預覽、辨識文字、待確認編輯表與找車結果，並取消進行中的工作，避免舊結果再次填回。
+- 誤加派工可逐筆移除；保留刪除時間以防瀏覽器舊備份再次帶回。其他派工及人工優先場站不受清除輸入影響。
 
 **2026/09/30｜主頁持續轉圈／即時車數與場站清單阻塞**
 - 主頁先呈現已有配置與現況；即時車數、電池場站清單改由受限背景工作處理，官方 API 連線不順不再拖住整頁。
@@ -1519,6 +1529,7 @@ if page_mode == "智慧調度":''',
 
 render_work_order_manager(
     base_df, cache=status_cache, token=active_base["token"], page_mode=page_mode,
+    route_station_map=battery_route_map,
     save=lambda: save_cached_status(active_base["token"], None, status_cache),
 )
 priority_station_ui = render_priority_station_manager(
@@ -1766,3 +1777,4 @@ replace_exact(
 
 source = _modernize_legacy_iframes(source)
 exec(compile_legacy_source(source, str(LEGACY_APP)), globals(), globals())
+

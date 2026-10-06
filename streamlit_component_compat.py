@@ -61,13 +61,17 @@ POST_V30_CHANGES: tuple[tuple[str, str], ...] = (
         "2026-10-03",
         "派工照片批次辨識、核對匯入、跨班待辦與一般分析／智慧調度／優先場站聯動；逐筆完成、復原及備份。",
     ),
+    (
+        "2026-10-06",
+        "派工新增完整車號批次找車：目前配置範圍內搜尋場站、柱號與電量，核對後加入共用派工待辦。",
+    ),
 )
 
 _COMPLETED_GENERATIONS_AFTER_V30 = len(POST_V30_CHANGES) // VERSION_CHANGE_THRESHOLD
 VERSION_PENDING_CHANGE_COUNT = len(POST_V30_CHANGES) % VERSION_CHANGE_THRESHOLD
 SYSTEM_GENERATION = VERSION_BASE_GENERATION + _COMPLETED_GENERATIONS_AFTER_V30
 SYSTEM_VERSION = f"V{SYSTEM_GENERATION}"
-SYSTEM_BUILD_DATE = "2026-10-03"
+SYSTEM_BUILD_DATE = "2026-10-06"
 SYSTEM_VERSION_LABEL = f"{SYSTEM_VERSION}｜第{SYSTEM_GENERATION}代"
 NEXT_SYSTEM_VERSION = f"V{SYSTEM_GENERATION + 1}"
 
@@ -672,3 +676,4 @@ def install_version_ui_compat() -> None:
 
 
 install_version_ui_compat()
+

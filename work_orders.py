@@ -21,7 +21,7 @@ def orders(cache):
 
 
 def pending(cache, station=None):
-    return [x for x in orders(cache) if x.get('state') != 'done' and
+    return [x for x in orders(cache) if x.get('state') not in ('done', 'deleted') and
             (station is None or station_key(x.get('station_name')) == station_key(station))]
 
 
@@ -46,7 +46,7 @@ def merge(cache, incoming):
             continue
         row = {k: str(raw.get(k) or '')[:2000] for k in FIELDS}
         row['id'] = identity(row)
-        row['state'] = raw.get('state') if raw.get('state') in ('pending', 'blocked', 'done') else 'pending'
+        row['state'] = raw.get('state') if raw.get('state') in ('pending', 'blocked', 'done', 'deleted') else 'pending'
         try:
             row['updated_at'] = min(float(raw.get('updated_at') or 0), time.time() + 60)
         except (TypeError, ValueError):
@@ -108,7 +108,53 @@ def badge_html(cache, station):
     return f'<small style="display:block;color:#a855f7;font-weight:800">🟣 派工 {len(tasks)} 件｜{html.escape(details)}</small>'
 
 
-def render_manager(status_df, *, cache, token, page_mode, save):
+def clear_draft(state, prefix):
+    """Reset widget state in a callback, before widgets are instantiated."""
+    for key in list(state):
+        if key in {prefix + '::text', prefix + '::draft', prefix + '::draft_version',
+                   prefix + '::notice'} or key.startswith(prefix + '::editor::'):
+            del state[key]
+    state[prefix + '::reset_epoch'] = int(state.get(prefix + '::reset_epoch', 0)) + 1
+
+
+def lookup_draft(matches, names, kind):
+    """Accept only configured stations and exact numeric equipment IDs."""
+    output = []
+    seen = set()
+    if kind not in ('換電', '收車', '車輛故障', '巡檢'):
+        return output
+    for row in matches[:100] if isinstance(matches, list) else []:
+        if not isinstance(row, dict):
+            continue
+        name, bike = str(row.get('station_name', '')), str(row.get('bike_no', ''))
+        if name not in names or not re.fullmatch(r'[0-9]{6,10}', bike):
+            continue
+        key = (name, bike)
+        if key in seen:
+            continue
+        seen.add(key)
+        description = f"車號查詢：柱號 {str(row.get('pillar_no') or '未知')[:20]}；查詢時間 {str(row.get('queried_at') or '')[:40]}"
+        output.append(dict(station_name=name, equipment=bike, kind=kind, issued_at='',
+                           description=description, selected=True))
+    return output
+
+
+def lookup_station_args(route_station_map):
+    # Reuse the battery map's bounded background job; never wait for network in the UI.
+    from battery_upgrade import _clean_route_map, _load_station_map, _monitor_station_map
+    from background_refresh import station_map_refresh
+    clean = _clean_route_map(route_station_map)
+    scope = tuple((zone, tuple((x['name'], x['district']) for x in items))
+                  for zone, items in sorted(clean.items()))
+    state = station_map_refresh.poll(scope, lambda: _load_station_map(clean))
+    if state.pending and state.value is None:
+        _monitor_station_map(scope, clean, 'work_order_station_map::' + hashlib.sha256(repr(scope).encode()).hexdigest())
+    return dict(stations=[x for items in (state.value or clean).values() for x in items],
+                catalog_pending=state.value is None,
+                catalog_error=state.error or '')
+
+
+def render_manager(status_df, *, cache, token, page_mode, save, route_station_map=None):
     import pandas as pd
     import streamlit as st
     import streamlit.components.v1 as components
@@ -117,14 +163,20 @@ def render_manager(status_df, *, cache, token, page_mode, save):
     component = components.declare_component('work_order_import', path=str(Path(__file__).with_name('work_order_component')))
     with st.expander(f'🟣 派工待辦｜{len(pending(cache))} 件未完成', expanded=False):
         st.caption('拍照／多張截圖 → 辨識 → 核對後一次加入。派工完成只記錄於本系統。')
-        event = component(token=token, snapshot=orders(cache), key=prefix + '::ocr', default=None)
+        epoch = st.session_state.get(prefix + '::reset_epoch', 0)
+        event = component(token=token, snapshot=orders(cache), reset_epoch=epoch,
+                          **lookup_station_args(route_station_map or {}),
+                          key=prefix + '::ocr', default=None)
         if isinstance(event, dict) and event.get('event_id') != st.session_state.get(prefix + '::event'):
             st.session_state[prefix + '::event'] = event.get('event_id')
             if event.get('type') == 'restore' and isinstance(event.get('orders'), list):
                 if merge(cache, event['orders']):
                     save()
                     st.rerun()
-            elif event.get('type') == 'ocr':
+            elif event.get('type') == 'lookup' and event.get('reset_epoch') == epoch:
+                st.session_state[prefix + '::draft'] = lookup_draft(event.get('matches'), names, event.get('kind'))
+                st.session_state[prefix + '::draft_version'] = str(event.get('event_id'))
+            elif event.get('type') == 'ocr' and event.get('reset_epoch') == epoch:
                 st.session_state[prefix + '::text'] = str(event.get('text') or '')[:100000]
                 st.session_state[prefix + '::draft'] = parse_text(event.get('text', ''), names)
                 st.session_state[prefix + '::draft_version'] = str(event.get('event_id'))
@@ -132,6 +184,9 @@ def render_manager(status_df, *, cache, token, page_mode, save):
         if st.button('整理為待確認清單', key=prefix + '::parse'):
             st.session_state[prefix + '::draft'] = parse_text(text, names)
             st.session_state[prefix + '::draft_version'] = str(time.time_ns())
+        st.button('🧹 清除輸入／重新開始', key=prefix + '::clear',
+                  on_click=clear_draft, args=(st.session_state, prefix),
+                  help='清除照片、辨識文字、待確認清單及車號搜尋結果；已加入的派工保留。')
         draft = st.session_state.get(prefix + '::draft')
         if draft:
             st.caption('空白場站代表尚未配對，請選正確場站；設備編號和時間也請核對。可直接新增或刪除列。')
@@ -149,15 +204,18 @@ def render_manager(status_df, *, cache, token, page_mode, save):
                 elif selected['派工類型'].fillna('').str.strip().eq('').any():
                     st.error('請填寫每筆勾選項目的派工類型。')
                 else:
-                    existing = {x['id'] for x in orders(cache)}
+                    existing = {x['id']: x for x in orders(cache)}
                     added = 0
                     for row in selected.fillna('').to_dict('records'):
                         item = {k: str(row[LABELS[k]]).strip() for k in FIELDS}
                         item_id = identity(item)
-                        if item_id not in existing:
+                        if item_id not in existing or existing[item_id].get('state') == 'deleted':
                             item.update(id=item_id, state='pending', updated_at=time.time())
-                            orders(cache).append(item)
-                            existing.add(item_id)
+                            if item_id in existing:
+                                existing[item_id].update(item)
+                            else:
+                                orders(cache).append(item)
+                                existing[item_id] = item
                             added += 1
                     save()
                     st.session_state[prefix + '::notice'] = f'已新增 {added} 筆，略過 {len(selected)-added} 筆重複派工。'
@@ -170,6 +228,8 @@ def render_manager(status_df, *, cache, token, page_mode, save):
             st.success(notice)
         show_done = st.checkbox('顯示已完成派工／復原', key=prefix + '::show_done')
         for item in list(orders(cache)):
+            if item['state'] == 'deleted':
+                continue
             if item['state'] == 'done' and not show_done:
                 continue
             with st.container(border=True):
@@ -185,6 +245,10 @@ def render_manager(status_df, *, cache, token, page_mode, save):
                     st.rerun()
                 if item['state'] != 'done' and right.button('恢復待辦' if item['state'] == 'blocked' else '暫時無法處理', key=prefix + item['id'] + 'block'):
                     item.update(state='pending' if item['state'] == 'blocked' else 'blocked', updated_at=time.time())
+                    save()
+                    st.rerun()
+                if st.button('移除誤加派工', key=prefix + item['id'] + 'delete'):
+                    item.update(state='deleted', updated_at=time.time())
                     save()
                     st.rerun()
         st.download_button('匯出派工紀錄', json.dumps(orders(cache), ensure_ascii=False, indent=2),
@@ -204,3 +268,4 @@ def render_manager(status_df, *, cache, token, page_mode, save):
         st.caption(f'🟣 尚有 {len(pending(cache))} 件派工／{len(pending_names(cache))} 站，請在派工待辦逐筆完成。')
     if page_mode == '一般分析':
         st.checkbox('🟣 只看未完成派工', key=prefix + '::only')
+

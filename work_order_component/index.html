@@ -1,15 +1,19 @@
 <!doctype html><html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
 body{font:14px system-ui,sans-serif;color:#64748b;margin:4px}button{background:#7c3aed;color:white;border:0;border-radius:8px;padding:10px;margin:8px 8px 6px 0;cursor:pointer}input{max-width:100%}button:disabled{opacity:.5}#status{white-space:pre-wrap;font-size:13px}label{display:block;margin:8px 0}
-</style><label>選擇派工照片／截圖（可多選）<input id="files" type="file" accept="image/jpeg,image/png,image/webp" multiple></label><label>直接拍照<input id="camera" type="file" accept="image/*" capture="environment"></label><details><summary>裁切／文字增強（拍螢幕時建議使用）</summary><label>保留起點 <input id="cropTop" type="range" min="0" max="90" value="0"></label><label>保留終點 <input id="cropBottom" type="range" min="10" max="100" value="100"></label><label><input id="enhance" type="checkbox" checked> 增強文字對比</label><small>預覽第一張；裁切設定會套用本次所有照片。</small><canvas id="preview" style="display:block;max-width:100%;max-height:200px"></canvas></details><button id="start">辨識照片</button><button id="cancel" disabled>取消</button><div id="status">首次辨識需下載繁體中文辨識資料。建議裁切派工表格、保持文字清楚。</div>
+</style><label>選擇派工照片／截圖（可多選）<input id="files" type="file" accept="image/jpeg,image/png,image/webp" multiple></label><label>直接拍照<input id="camera" type="file" accept="image/*" capture="environment"></label><details><summary>裁切／文字增強（拍螢幕時建議使用）</summary><label>保留起點 <input id="cropTop" type="range" min="0" max="90" value="0"></label><label>保留終點 <input id="cropBottom" type="range" min="10" max="100" value="100"></label><label><input id="enhance" type="checkbox" checked> 增強文字對比</label><small>預覽第一張；裁切設定會套用本次所有照片。</small><canvas id="preview" style="display:block;max-width:100%;max-height:200px"></canvas></details><hr><details id="lookup-panel"><summary>🔎 輸入車號找車</summary><p>搜尋目前配置表範圍的站上車輛資料；不保證涵蓋一般車、借出或離站車輛，並非 GPS 定位。</p><textarea id="bike-numbers" rows="3" style="width:95%" placeholder="完整車號，可用空白、逗號或換行分隔"></textarea><div id="lookup-scope"></div><button id="bike-search">查詢車號</button><button id="bike-cancel" disabled>停止查詢</button><div id="bike-status" role="status"></div><div id="bike-results"></div><label>派工類型 <select id="bike-kind"><option>換電</option><option>收車</option><option>車輛故障</option><option>巡檢</option></select></label><button id="bike-use" disabled>將勾選結果放入待確認清單</button></details><hr><button id="start">辨識照片</button><button id="cancel" disabled>取消</button><div id="status">首次辨識需下載繁體中文辨識資料。建議裁切派工表格、保持文字清楚。</div>
+<script src="lookup.js"></script>
 <script>
 const files=document.getElementById('files'),camera=document.getElementById('camera'),start=document.getElementById('start'),cancel=document.getElementById('cancel'),status=document.getElementById('status');
-let worker=null,generation=0,restoreSent=false,token='';
+let worker=null,generation=0,previewGeneration=0,restoreSent=false,token='',resetEpoch=0;
 function send(type,extra={}){parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
-function value(data){send('streamlit:setComponentValue',{value:{...data,event_id:Date.now()+'-'+Math.random()},dataType:'json'})}
+function value(data){send('streamlit:setComponentValue',{value:{...data,reset_epoch:resetEpoch,event_id:Date.now()+'-'+Math.random()},dataType:'json'})}
 function resize(){send('streamlit:setFrameHeight',{height:document.body.scrollHeight+16})}
 function report(s){status.textContent=s;resize()}
 addEventListener('message',e=>{if(e.source!==parent||e.data.type!=='streamlit:render')return;
- const a=e.data.args;token=a.token;
+ const a=e.data.args;
+ if(token!==a.token||resetEpoch!==(a.reset_epoch||0)){resetInputs();restoreSent=false}
+ token=a.token;resetEpoch=a.reset_epoch||0;
+ WorkOrderLookup.configure(a);
  try{const key='ubike:work-orders:'+token;const saved=JSON.parse(localStorage.getItem(key)||'[]');const remote=a.snapshot||[];
  const byId=new Map(remote.map(x=>[x.id,x]));let newer=false;
  for(const x of saved){const old=byId.get(x.id);if(!old||Number(x.updated_at)>Number(old.updated_at)){byId.set(x.id,x);newer=true}}
@@ -20,8 +24,15 @@ addEventListener('message',e=>{if(e.source!==parent||e.data.type!=='streamlit:re
 function loadOCR(){if(window.Tesseract)return Promise.resolve();return new Promise((resolve,reject)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';s.onload=resolve;s.onerror=()=>{s.remove();reject(Error('辨識套件下載失敗，請檢查網路或改貼派工文字。'))};document.head.appendChild(s)})}
 const cropTop=document.getElementById('cropTop'),cropBottom=document.getElementById('cropBottom'),enhance=document.getElementById('enhance');
 async function canvasFor(file){const url=URL.createObjectURL(file);try{const img=new Image();img.src=url;await img.decode();const top=Number(cropTop.value)/100,bottom=Number(cropBottom.value)/100;if(bottom<=top)throw Error('裁切終點必須大於起點');const h=img.height*(bottom-top);const scale=Math.min(2,3200/Math.max(img.width,h));const c=document.createElement('canvas');c.width=Math.round(img.width*scale);c.height=Math.round(h*scale);const ctx=c.getContext('2d');ctx.drawImage(img,0,img.height*top,img.width,h,0,0,c.width,c.height);if(enhance.checked){const data=ctx.getImageData(0,0,c.width,c.height),d=data.data,hist=new Uint32Array(256);for(let i=0;i<d.length;i+=4){const v=Math.round(.299*d[i]+.587*d[i+1]+.114*d[i+2]);d[i]=d[i+1]=d[i+2]=v;hist[v]++}const n=d.length/4;let lo=0,hi=255,sum=0;while(lo<254&&sum<n*.01)sum+=hist[lo++];sum=0;while(hi>lo+1&&sum<n*.01)sum+=hist[hi--];for(let i=0;i<d.length;i+=4){const v=Math.max(0,Math.min(255,((d[i]-lo)*255/(hi-lo)-128)*1.5+128));d[i]=d[i+1]=d[i+2]=v}ctx.putImageData(data,0,0)}return c}finally{URL.revokeObjectURL(url)}}
-async function preview(){try{const file=files.files[0]||camera.files[0];if(!file)return;const c=await canvasFor(file),p=document.getElementById('preview');p.width=c.width;p.height=c.height;p.getContext('2d').drawImage(c,0,0);resize()}catch(e){report(e.message)}}
-camera.onchange=()=>{files.value='';preview()};files.onchange=()=>{camera.value='';preview()};cropTop.oninput=cropBottom.oninput=enhance.onchange=preview;document.querySelector('details').ontoggle=resize;
+async function preview(){const run=++previewGeneration;try{const file=files.files[0]||camera.files[0];if(!file)return;const c=await canvasFor(file),p=document.getElementById('preview');if(run!==previewGeneration)return;p.width=c.width;p.height=c.height;p.getContext('2d').drawImage(c,0,0);resize()}catch(e){report(e.message)}}
+camera.onchange=()=>{files.value='';preview()};files.onchange=()=>{camera.value='';preview()};cropTop.oninput=cropBottom.oninput=enhance.onchange=preview;document.querySelectorAll('details').forEach(x=>x.ontoggle=resize);
+function resetInputs(){
+ generation++;previewGeneration++;if(worker){worker.terminate();worker=null}
+ files.value='';camera.value='';cropTop.value='0';cropBottom.value='100';enhance.checked=true;
+ const p=document.getElementById('preview');p.width=p.height=0;
+ start.disabled=false;cancel.disabled=true;WorkOrderLookup.reset();report('已清除，可重新輸入或選擇照片。');
+}
+WorkOrderLookup.init(value,resize);
 cancel.onclick=()=>{generation++;if(worker){worker.terminate();worker=null}start.disabled=false;cancel.disabled=true;report('已取消，可重新選照片。')};
 start.onclick=async()=>{const selected=[...files.files,...camera.files];if(!selected.length){report('請先選擇照片。');return}if(selected.length>10||selected.some(f=>f.size>15*1024*1024)){report('一次最多 10 張，每張上限 15 MB。');return}
  const run=++generation;start.disabled=true;cancel.disabled=false;let timeout;
@@ -36,3 +47,4 @@ start.onclick=async()=>{const selected=[...files.files,...camera.files];if(!sele
  finally{clearTimeout(timeout);if(run===generation){if(worker)await worker.terminate();worker=null;start.disabled=false;cancel.disabled=true;resize()}}};
 send('streamlit:componentReady',{apiVersion:1});resize();
 </script></html>
+
