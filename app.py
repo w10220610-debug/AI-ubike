@@ -2,7 +2,7 @@ from __future__ import annotations
 
 V29_COMPATIBILITY_NOTES = """V29 old-UI compatibility entrypoint.
 
-The original legacy UI is kept byte-for-byte in ``legacy_ui.py``. Before
+The legacy UI is maintained in ``legacy_ui.py``. Before
 executing it, this entrypoint applies focused V29 compatibility fixes:
 
 1. battery ranges accept any non-empty Excel zone instead of D1/D2/D3 only;
@@ -857,6 +857,11 @@ replace_exact(
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
 
+**2026/10/07｜即時車數取得修復**
+- 修正背景工作比場站清單重試更早逾時，避免仍在取得的資料被提前丟棄。
+- 雲端查詢失敗時自動啟用瀏覽器直連備援，僅查詢目前配置可安全配對的場站；保留原有車數與錯誤提示。
+- 本次為 BUG 修復，不累計功能升版次數。
+
 **2026/10/06｜車號找車與派工清理**
 - 派工新增完整車號批次搜尋，按下查詢才搜尋目前配置範圍，顯示場站、柱號、電量與查詢時間，核對後可加入派工。
 - 使用既有站上車輛 API；不保證涵蓋一般車、借出或離站車輛。查詢逾時、失敗、未配對及未查完會分開提示，不當成查無車輛。
@@ -925,6 +930,11 @@ replace_exact(
 _BUG_FIX_CONTENT_MD = """
 #### 🐞 BUG 修復紀錄
 > 僅記錄已實際完成的修復；單純新增功能不列入。
+
+**2026/10/07｜取得不到即時車輛資訊**
+- 即時車數背景期限調整為 75 秒、電池場站清單為 50 秒，涵蓋清單重試及車數查詢；前景仍不等待網路。
+- 雲端錯誤狀態變更時只觸發一次重繪，自動掛載瀏覽器備援；雲端恢復後回到伺服器共用資料。
+- 瀏覽器備援立即查詢目前配置，整輪上限 25 秒；禁止同名歧義配對，部分成功仍回傳已取得資料，失敗不填零。
 
 **2026/10/06｜派工輸入失敗後無法清除**
 - 清除會重設照片、裁切預覽、辨識文字、待確認編輯表與找車結果，並取消進行中的工作，避免舊結果再次填回。
@@ -1220,7 +1230,10 @@ replace_exact(
 # shape, so the existing matching, cache persistence and rendering remain intact.
 replace_exact(
     'def normalize_browser_live_payload(payload) -> dict:',
-    '''def get_youbike_browser_sync_component():
+    '''_get_original_browser_sync_component = get_youbike_browser_sync_component
+
+
+def get_youbike_browser_sync_component():
     """V29 compatibility: obtain live station data from the Python Server."""
     from live_status_ui import render_background_live_status
 
@@ -1232,7 +1245,17 @@ replace_exact(
         if refresh_token and st.session_state.get(refresh_state_key) != refresh_token:
             st.session_state[refresh_state_key] = refresh_token
             force_refresh = True
-        return render_background_live_status(stations, force=force_refresh)
+        def browser_fallback():
+            options = dict(_kwargs)
+            options.update(station_specs=stations, start_immediately=True,
+                           max_batch_rounds=2, max_single_rounds=0,
+                           total_timeout_ms=25000)
+            options["key"] = str(options.get("key") or "live") + "::fallback"
+            return _get_original_browser_sync_component()(**options)
+
+        return render_background_live_status(
+            stations, force=force_refresh, browser_fallback=browser_fallback,
+        )
 
     return _server_sync_component
 
@@ -1777,4 +1800,3 @@ replace_exact(
 
 source = _modernize_legacy_iframes(source)
 exec(compile_legacy_source(source, str(LEGACY_APP)), globals(), globals())
-

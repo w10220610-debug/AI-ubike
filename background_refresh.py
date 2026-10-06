@@ -114,5 +114,8 @@ class BackgroundRefresh:
                                 job.error, job.revision, age)
 
 
-live_refresh = BackgroundRefresh()
-station_map_refresh = BackgroundRefresh(ttl=6 * 60 * 60, stale_ttl=24 * 60 * 60)
+# A cold catalog may use 3 x 15s plus backoff, then parking has a 20s budget.
+# These are background deadlines, never waits on the Streamlit render thread.
+live_refresh = BackgroundRefresh(timeout=75)
+station_map_refresh = BackgroundRefresh(ttl=6 * 60 * 60, stale_ttl=24 * 60 * 60,
+                                        timeout=50)

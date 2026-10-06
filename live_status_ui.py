@@ -51,13 +51,15 @@ def _monitor(scope, state_key):
         st.session_state.pop(awaiting_key, None)
 
     event = str((state.value or {}).get("event_id") or "")
-    if event and event != st.session_state.get(state_key):
+    error_changed = state.error != st.session_state.get(state_key + "::error", "")
+    if error_changed or (event and event != st.session_state.get(state_key)):
         st.session_state[state_key] = event
-        # Only a newly completed snapshot reruns data rendering; polling stays local.
+        st.session_state[state_key + "::error"] = state.error
+        # Mount/unmount browser fallback once per error transition, not every poll.
         st.rerun()
 
 
-def render_background_live_status(stations, *, force=False):
+def render_background_live_status(stations, *, force=False, browser_fallback=None):
     scope = station_scope(stations)
     if not scope:
         st.warning("目前配置沒有可供同步的場站；原有資料保留。")
@@ -68,5 +70,11 @@ def render_background_live_status(stations, *, force=False):
         st.session_state[state_key + "::manual"] = state.revision
         _emit_sync_state("busy")
     st.session_state[state_key] = str((state.value or {}).get("event_id") or "")
+    st.session_state[state_key + "::error"] = state.error
     _monitor(scope, state_key)
+    if state.error and browser_fallback is not None:
+        st.info("雲端即時車數連線未完成，已啟用瀏覽器直連備援；雲端仍會自動重試。")
+        browser_value = browser_fallback()
+        if isinstance(browser_value, dict):
+            return browser_value
     return state.value

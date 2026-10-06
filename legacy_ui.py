@@ -951,6 +951,36 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
   let autoTimer = null;
   const SIGNATURE_STORAGE_KEY = "ubike-live-count-signature-v1";
   const UNCHANGED_HEARTBEAT_MS = 5 * 60 * 1000;
+  let syncDeadline = Infinity;
+  let initialSyncStarted = false;
+
+  function stationNameKey(value) {
+    return String(value || "").normalize("NFKC").toLowerCase().replaceAll("臺", "台")
+      .replace(/^(?:youbike|ubike)\s*2\s*[.．]?\s*0\s*e?\s*[_\-－—:：]*\s*/i, "")
+      .replaceAll("公共自行車租賃站", "").replace(/[^0-9a-z\u3400-\u9fff]/g, "");
+  }
+
+  function selectConfiguredCatalog(items) {
+    if (!Array.isArray(args.station_specs)) return items.filter(isTaitung);
+    const selected = new Map();
+    for (const spec of args.station_specs) {
+      const wanted = stationNameKey(spec.name || spec.station_name);
+      if (!wanted) continue;
+      let matches = items.filter(item => stationNameKey(
+        firstNonempty(item.name_tw, item.sna, item.station_name)) === wanted);
+      if (matches.length > 1 && spec.district) {
+        const district = stationNameKey(spec.district);
+        matches = matches.filter(item => [item.county_tw, item.city_tw,
+          item.district_tw, item.sarea, item.address_tw, item.ar]
+          .some(value => stationNameKey(value).includes(district)));
+      }
+      if (matches.length !== 1) continue;
+      const item = matches[0];
+      const id = String(firstNonempty(item.station_no, item.sno, item.station_id) || "");
+      if (id) selected.set(id, item);
+    }
+    return Array.from(selected.values());
+  }
 
   function signatureStorageKey() {
     return `${SIGNATURE_STORAGE_KEY}:${String(args.signature_scope || "default")}`;
@@ -1041,8 +1071,10 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
   async function fetchJson(url, options = {}, maxAttempts = 3) {
     let lastError = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const remaining = syncDeadline - performance.now();
+      if (remaining <= 0) throw new Error("瀏覽器即時車數查詢已達時間上限，未取得的場站保留原有資料");
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 25000);
+      const timeout = setTimeout(() => controller.abort(), Math.min(12000, remaining));
       try {
         const response = await fetch(url, {
           cache: "no-store",
@@ -1111,6 +1143,7 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
     }
     busy = true;
     const startedAt = performance.now();
+    syncDeadline = startedAt + Math.max(1000, Math.min(25000, Number(args.total_timeout_ms || 25000)));
     sendHostSyncState("busy");
     button.disabled = true;
     button.textContent = "⏳ 正在高速分批讀取 YouBike 官網……";
@@ -1122,14 +1155,14 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
       const batchSize = Math.max(1, Math.min(50, Number(args.batch_size || 20)));
       const concurrency = Math.max(1, Math.min(6, Number(args.request_concurrency || 4)));
       const maxBatchRounds = Math.max(1, Math.min(8, Number(args.max_batch_rounds || 4)));
-      const maxSingleRounds = Math.max(0, Math.min(4, Number(args.max_single_rounds || 2)));
+      const maxSingleRounds = Math.max(0, Math.min(4, Number(args.max_single_rounds ?? 2)));
       const waveDelayMs = Math.max(0, Math.min(1000, Number(args.wave_delay_ms || 70)));
 
       const catalogPayload = await fetchJson(catalogUrl, {
         method: "GET",
         headers: { "Accept": "application/json, text/plain, */*" },
       });
-      const catalog = extractItems(catalogPayload).filter(isTaitung).map(item => {
+      const catalog = selectConfiguredCatalog(extractItems(catalogPayload)).map(item => {
         const stationId = String(firstNonempty(item.station_no, item.sno, item.station_id) || "").trim();
         const stationName = String(firstNonempty(item.name_tw, item.sna, item.station_name) || "").trim();
         return {
@@ -1143,7 +1176,7 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
         };
       }).filter(item => item.station_id && item.station_name);
 
-      if (!catalog.length) throw new Error("官網站點清單中找不到臺東候選場站");
+      if (!catalog.length) throw new Error("官網站點清單中沒有可安全配對目前配置的場站");
 
       const requestedStationIds = [...new Set(catalog.map(item => item.station_id))];
       const requestedStationIdSet = new Set(requestedStationIds);
@@ -1193,6 +1226,7 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
 
         async function worker() {
           while (true) {
+            if (performance.now() >= syncDeadline) return;
             const index = nextIndex;
             nextIndex += 1;
             if (index >= groups.length) return;
@@ -1225,7 +1259,7 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
       let previousMissingCount = missingStationIds.length + 1;
 
       // 主階段：每一輪都使用設定的最大批次，並行查完後只保留仍缺少的場站進入下一輪。
-      for (let round = 1; round <= maxBatchRounds && missingStationIds.length; round += 1) {
+      for (let round = 1; round <= maxBatchRounds && missingStationIds.length && performance.now() < syncDeadline; round += 1) {
         batchRoundCount = round;
         const groups = batched(missingStationIds, batchSize);
         setStatus(
@@ -1235,7 +1269,7 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
         const result = await runGroups(groups, `高速批次第 ${round} 輪`);
         missingStationIds = currentMissingIds();
 
-        if (!missingStationIds.length) break;
+        if (!missingStationIds.length || performance.now() >= syncDeadline) break;
         // 這一輪完全沒有新增資料時，繼續重送相同批次沒有速度效益，立即改走單站補查。
         if (result.addedCount <= 0 || missingStationIds.length >= previousMissingCount) break;
         previousMissingCount = missingStationIds.length;
@@ -1244,7 +1278,7 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
 
       // 最後階段：只對殘留漏站做單站並行查詢，避免一個異常站拖累同批其他場站。
       missingStationIds = currentMissingIds();
-      for (let round = 1; round <= maxSingleRounds && missingStationIds.length; round += 1) {
+      for (let round = 1; round <= maxSingleRounds && missingStationIds.length && performance.now() < syncDeadline; round += 1) {
         singleRoundCount = round;
         const singleGroups = missingStationIds.map(stationId => [stationId]);
         setStatus(
@@ -1283,7 +1317,7 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
         });
       }
 
-      if (!records.length) throw new Error("官網沒有回傳臺東場站即時車數");
+      if (!records.length) throw new Error("官網沒有回傳可用即時車數；請稍後重試，原有資料保留");
       missingStationIds = currentMissingIds();
 
       // 每次仍照常向官網取得資料；只有車數／營運狀態／漏站清單真的變動時，
@@ -1318,6 +1352,7 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
           requested_station_count: requestedStationIds.length,
           missing_station_count: missingStationIds.length,
           missing_station_ids: missingStationIds,
+          configured_station_count: Array.isArray(args.station_specs) ? args.station_specs.length : catalog.length,
           request_batch_count: requestCount,
           request_count: requestCount,
           failed_request_count: failedRequestCount,
@@ -1367,6 +1402,11 @@ YOUBIKE_BROWSER_COMPONENT_HTML = r"""<!doctype html>
     args = event.data.args || {};
     button.textContent = args.button_label || "🔄 手動更新即時車數";
     button.disabled = Boolean(event.data.disabled) || busy;
+    if (args.start_immediately && !initialSyncStarted) {
+      initialSyncStarted = true;
+      runSync({ forceDelivery: true });
+      return;
+    }
     scheduleAutoSync();
     setHeight();
   });
