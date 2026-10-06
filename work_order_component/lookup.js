@@ -60,6 +60,12 @@ const WorkOrderLookup = (() => {
     $('lookup-scope').textContent = `目前配置範圍：${(args.stations || []).length} 站` +
       (args.catalog_pending ? '；站號清單準備中，稍後即可查詢。' : '') +
       (args.catalog_error ? '；場站清單更新失敗。' : '');
+    const prefill = [...new Set((args.prefill_bike_numbers || []).map(norm).filter(x => /^[0-9]{6,10}$/.test(x)))];
+    if (prefill.length && !$('bike-numbers').value.trim() && $('bike-cancel').disabled) {
+      $('bike-numbers').value = prefill.join('\n');
+      $('lookup-panel').open = true;
+      report(`已從派工內容抓到 ${prefill.length} 個車號；按「找場站並帶入派工」即可自動回填。`);
+    }
     if ($('bike-cancel').disabled) $('bike-search').disabled = !!args.catalog_pending;
     resize();
   }
@@ -118,12 +124,22 @@ const WorkOrderLookup = (() => {
     $('bike-search').disabled = false; $('bike-cancel').disabled = true;
     renderMatches();
     const found = new Set(matches.map(x => x.bike_no)), missing = ids.filter(x => !found.has(x));
-    report(`${timedOut ? '搜尋達 60 秒上限，結果不完整。' : '本次搜尋結束。'}成功查詢 ${succeeded}/${specs.length} 站，找到 ${found.size} 台。` +
-      (missing.length ? ` 本次未找到：${missing.join('、')}；不代表車輛不在或已借出。` : '') +
-      (failed.length ? ` 失敗 ${failed.length} 站：${failed.join('、')}。` : '') +
-      (specs.length > finished ? ` 尚有 ${specs.length - finished} 站未查。` : '') +
-      (unmapped.length ? ` 未配對 ${unmapped.length} 站：${unmapped.join('、')}。` : '') +
-      ' 結果是查詢時的站上資料，到站前可再查一次。');
+    const counts = new Map();
+    for (const m of matches) counts.set(m.bike_no, (counts.get(m.bike_no) || 0) + 1);
+    const uniqueMatches = matches.filter(m => counts.get(m.bike_no) === 1);
+    const autoApply = !timedOut && !failed.length && !unmapped.length && !missing.length &&
+      uniqueMatches.length === ids.length;
+    if (autoApply) {
+      emit({type: 'lookup', matches: uniqueMatches, kind: $('bike-kind').value});
+      report(`已找到 ${ids.length} 台，唯一場站已自動帶入派工待確認清單。`);
+    } else {
+      report(`${timedOut ? '搜尋達 60 秒上限，結果不完整。' : '本次搜尋結束。'}成功查詢 ${succeeded}/${specs.length} 站，找到 ${found.size} 台。` +
+        (missing.length ? ` 本次未找到：${missing.join('、')}；不代表車輛不在或已借出。` : '') +
+        (failed.length ? ` 失敗 ${failed.length} 站：${failed.join('、')}。` : '') +
+        (specs.length > finished ? ` 尚有 ${specs.length - finished} 站未查。` : '') +
+        (unmapped.length ? ` 未配對 ${unmapped.length} 站：${unmapped.join('、')}。` : '') +
+        ' 有多位置或查詢不完整時不會自動套用，請核對勾選結果後再帶入。');
+    }
   }
   function init(send, onResize) {
     emit = send; resize = onResize;
