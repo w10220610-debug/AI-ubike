@@ -1,0 +1,63 @@
+name: Build V29 Formal App
+
+on:
+  push:
+    branches:
+      - v29-formal-full
+    paths:
+      - app.py
+      - app_patch_legacy.py
+      - legacy_ui.py
+      - tools/build_formal_app.py
+      - .github/workflows/build-formal-app.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Build native integrated app
+        run: python tools/build_formal_app.py
+
+      - name: Static verification
+        run: |
+          python -m py_compile app.py
+          python -m py_compile live_status_ui.py battery_upgrade.py live_status_service.py battery_service.py work_orders.py
+          python - <<'PY'
+          from pathlib import Path
+          text = Path("app.py").read_text(encoding="utf-8")
+          checks = {
+              "runtime replace_exact": "def replace_exact(",
+              "legacy runtime read": "LEGACY_APP.read_text",
+              "runtime compile/exec": "exec(compile_legacy_source",
+          }
+          failed = [name for name, token in checks.items() if token in text]
+          if failed:
+              raise SystemExit("Formalization check failed: " + ", ".join(failed))
+          print("Formal app verification passed.")
+          PY
+
+      - name: Commit generated formal runtime
+        run: |
+          if git diff --quiet -- app.py app_patch_legacy.py; then
+            echo "No generated changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py app_patch_legacy.py
+          git commit -m "refactor: integrate V29 runtime into formal app"
+          git push
