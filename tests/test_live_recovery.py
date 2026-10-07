@@ -34,7 +34,9 @@ class LiveRecoveryTests(unittest.TestCase):
             manager._pool.shutdown(wait=True)
 
     def test_all_legacy_compatibility_patches_still_apply(self):
-        tree = ast.parse((ROOT / "app.py").read_text())
+        # Production app.py is native-integrated. Keep validating the archived
+        # patcher only as a migration regression fixture.
+        tree = ast.parse((ROOT / "app_patch_legacy.py").read_text())
         ns = {"source": (ROOT / "legacy_ui.py").read_text(), "BATTERY_ICON_DATA_URI": "fixture"}
         active = False
         for node in tree.body:
