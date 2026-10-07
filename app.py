@@ -4,10 +4,10 @@
 
 from __future__ import annotations
 
-V29_COMPATIBILITY_NOTES = """V29 old-UI compatibility entrypoint.
+V29_COMPATIBILITY_NOTES = """V29 formal full-version integration notes.
 
-The legacy UI is maintained in ``legacy_ui.py``. Before
-executing it, this entrypoint applies focused V29 compatibility fixes:
+These capabilities are integrated directly into the production app runtime.
+The archived legacy patcher is retained only for migration regression tests:
 
 1. battery ranges accept any non-empty Excel zone instead of D1/D2/D3 only;
 2. an uploaded workbook never gets merged with the built-in Taitung fallback;
@@ -4514,6 +4514,14 @@ st.set_page_config(
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
 
+**2026/10/08｜V29 正式完整版架構整合與效能加速**
+- 將原本「legacy_ui.py ＋ 48 個 replace_exact() 動態修補 ＋ compile/exec」改為正式整合的原生 app.py；執行時不再讀取舊 UI 原始碼、不再動態改字串、不再二次編譯後 exec。
+- 保留一般分析、智慧調度、優先場站、派工、定位、電池與右側懸浮工具等既有功能；legacy_ui.py 與舊 patcher 只作遷移備份／回歸測試，不參與正式執行。
+- 即時車數冷啟動與手動更新改為 Server 與手機瀏覽器同時查詢，先成功者先顯示；已有舊資料時先保留舊資料，再於背景換成新資料。
+- 電池查詢在 Server 場站編號尚未準備完成時，不再整頁等待；手機瀏覽器會直接取得 YouBike 場站清單並安全配對 station_no，再查詢電池。
+- 即時車數與電池場站背景監控由 2 秒降低為 5 秒輪詢；主頁操作與瀏覽器直連不受影響，降低 Streamlit 長時間空轉與重繪負擔。
+- 系統名稱更新為「V29 正式完整版」，本次重點為正式化底層架構與穩定／速度優化，不改變既有調度操作習慣。
+
 **2026/10/07｜派工車號自動反查場站**
 - 派工可只輸入完整車號；本輪查詢完整且每台只有一個位置時，自動把場站與柱號帶入待確認清單，不必再手動選場站。
 - 照片辨識或貼上文字若只有車號、沒有場站，會把未配對車號自動帶到找車欄；查回後回填原派工列，保留已辨識的派工類型與描述。
@@ -4585,6 +4593,12 @@ _UPDATE_CONTENT_MD = f"""
 _BUG_FIX_CONTENT_MD = """
 #### 🐞 BUG 修復紀錄
 > 僅記錄已實際完成的修復；單純新增功能不列入。
+
+**2026/10/08｜即時車數與電池偶發長時間等待**
+- 修正冷啟動時必須先等待雲端 Server 失敗才切換手機備援的流程；現在兩條路徑可並行，避免 Server 連 YouBike 慢時拖住現場操作。
+- 電池場站 station_no 配對加入瀏覽器端備援；Server 場站清單仍在背景準備時也能直接查詢，不再因場站清單 pending 而整個阻擋。
+- 已有即時資料或電池快取時優先保留顯示，更新失敗不清零；降低官方 API 暫時不穩造成畫面「像沒資料」的情況。
+- 背景狀態監控降頻，減少手機長時間使用時的 Streamlit fragment 重跑與 DOM 重繪。
 
 **2026/10/07｜取得不到即時車輛資訊**
 - 即時車數背景期限調整為 75 秒、電池場站清單為 50 秒，涵蓋清單重試及車數查詢；前景仍不等待網路。
@@ -12765,7 +12779,7 @@ if cache_expired:
 
 with st.sidebar:
     st.header("配置")
-    st.caption("系統版本：測試版")
+    st.caption("系統版本：V29 正式完整版")
 
     if st.session_state.pop("base_expired_notice", False):
         st.warning("原配置無法讀取，請重新上傳。")
