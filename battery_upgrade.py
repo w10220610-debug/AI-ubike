@@ -388,7 +388,7 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
      runtime.locationState.watchId=null;
    }catch(_){}
  }
- function open(){const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');fab.style.display='none';page.classList.add('open');page.setAttribute('aria-hidden','false');root._htmlOverflow=doc.documentElement.style.overflow;root._bodyOverflow=doc.body.style.overflow;doc.documentElement.style.overflow='hidden';doc.body.style.overflow='hidden';render();startLocationWatch();}
+ function open(){const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');fab.style.display='none';page.classList.add('open');page.setAttribute('aria-hidden','false');root._htmlOverflow=doc.documentElement.style.overflow;root._bodyOverflow=doc.body.style.overflow;doc.documentElement.style.overflow='hidden';doc.body.style.overflow='hidden';render();startLocationWatch();if(args.catalog_pending)loadCatalog().catch(()=>{});}
  function close(){const root=ensure(),page=root.querySelector('#ub-v29-page'),fab=root.querySelector('#ub-v29-fab');page.classList.remove('open');page.setAttribute('aria-hidden','true');fab.style.display='flex';doc.documentElement.style.overflow=root._htmlOverflow||'';doc.body.style.overflow=root._bodyOverflow||'';reverseStations.clear();stopLocationWatch();}
  function prefs(){try{return JSON.parse(localStorage.getItem('ubike-v29-fast-battery-pref')||'{}')||{};}catch(_){return {};}}
  function savePrefs(v){try{localStorage.setItem('ubike-v29-fast-battery-pref',JSON.stringify(v));}catch(_){}}
