@@ -32,7 +32,7 @@ def _emit_sync_state(state, *, station_count=0, message=""):
               height=1, tab_index=-1)
 
 
-@st.fragment(run_every=2)
+@st.fragment(run_every=5)
 def _monitor(scope, state_key):
     state = live_refresh.poll(scope, lambda: _load(scope))
     awaiting_key = state_key + "::manual"
