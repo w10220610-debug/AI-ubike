@@ -335,7 +335,7 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
  function buildRoot(){
    let old=doc.getElementById(ROOT);if(old)old.remove();
    const root=doc.createElement('div');root.id=ROOT;
-   root.innerHTML=`<button id="ub-v29-fab" type="button" aria-label="電量查詢">⚡</button><section id="ub-v29-page" aria-hidden="true"><div class="shell"><header><button id="ub-v29-close" type="button">‹ 返回</button><div><h1>⚡ 2.0E 電量查詢｜測試版</h1><p>持續定位｜距離排序｜行政區統整</p></div></header><main id="ub-v29-main"></main></div></section>`;
+   root.innerHTML=`<button id="ub-v29-fab" type="button" aria-label="電量查詢">⚡</button><section id="ub-v29-page" aria-hidden="true"><div class="shell"><header><button id="ub-v29-close" type="button">‹ 返回</button><div><h1>⚡ 2.0E 電量查詢｜V29 正式完整版</h1><p>持續定位｜距離排序｜行政區統整</p></div></header><main id="ub-v29-main"></main></div></section>`;
    doc.body.appendChild(root);return root;
  }
  function ensure(){
