@@ -113,7 +113,7 @@ def _load_station_map(clean_map):
     return resolved
 
 
-@st.fragment(run_every=2)
+@st.fragment(run_every=5)
 def _monitor_station_map(scope, clean_map, state_key):
     state = station_map_refresh.poll(scope, lambda: _load_station_map(clean_map))
     if state.pending and state.value is None:
