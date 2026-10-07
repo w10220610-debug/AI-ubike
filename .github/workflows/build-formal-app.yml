@@ -62,7 +62,7 @@ jobs:
           PY
 
       - name: Python test suite
-        run: pytest -q
+        run: PYTHONPATH=. pytest -q
 
       - name: Commit generated formal runtime
         run: |
