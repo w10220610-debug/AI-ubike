@@ -179,3 +179,5 @@ def build() -> None:
 
 if __name__ == "__main__":
     build()
+
+# Workflow trigger marker: formal migration.
