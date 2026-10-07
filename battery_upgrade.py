@@ -139,7 +139,7 @@ def render_floating_server_battery(
     state_key = "background_battery_map::" + hashlib.sha256(repr(scope).encode()).hexdigest()
     state = station_map_refresh.poll(scope, lambda: _load_station_map(clean_map))
     resolved_map = state.value if state.value is not None else clean_map
-    catalog_error = state.error or ("場站清單正在準備，請稍後查詢。" if state.value is None else "")
+    catalog_error = state.error or ("伺服器場站清單背景準備中；可直接查詢，瀏覽器會自動配對。" if state.value is None else "")
     st.session_state[state_key] = state.revision
     _monitor_station_map(scope, clean_map, state_key)
     args = {
@@ -159,11 +159,11 @@ def render_floating_server_battery(
  const args=__ARGS__;
  const win=window.parent, doc=win.document;
  const ROOT='ubike-battery-v29-upgrade';
- const BATTERY_URL='https://apis.youbike.com.tw/api/front/bike/lists';
+ const CATALOG_URL='https://apis.youbike.com.tw/json/station-min-yb2.json';\n const BATTERY_URL='https://apis.youbike.com.tw/api/front/bike/lists';
  const FRESH_MS=30000, STALE_MS=300000, CONCURRENCY=8, REQUEST_TIMEOUT_MS=8500;
  const PREF_VERSION=5, LOCATION_WATCH_VERSION=3;
  const runtime=win.__ubikeV29FastBattery||(win.__ubikeV29FastBattery={cache:new Map(),run:0});
- if(!(runtime.cache instanceof Map))runtime.cache=new Map();
+ if(!(runtime.cache instanceof Map))runtime.cache=new Map();\n if(!Array.isArray(runtime.catalog))runtime.catalog=null;\n if(!runtime.catalogPromise)runtime.catalogPromise=null;
  if(!runtime.locationState)runtime.locationState={lat:null,lon:null,accuracy:null,updatedAt:0,error:'',watchId:null,watchVersion:0};
  if(!runtime.currentResults||typeof runtime.currentResults!=='object'||Array.isArray(runtime.currentResults))runtime.currentResults={};
  const currentResults=runtime.currentResults;
@@ -205,6 +205,58 @@ def render_floating_server_battery(
      return await response.json();
    }finally{clearTimeout(timer);}
  }
+ function catalogName(x){return String(x?.name_tw||x?.sna||x?.station_name||x?.name||'').trim();}
+ function catalogDistrict(x){return String(x?.district_tw||x?.sarea||x?.district||'').trim();}
+ function catalogStationNo(x){return String(x?.station_no||x?.sno||x?.station_id||x?.station_uid||'').trim();}
+ async function loadCatalog(){
+   if(Array.isArray(runtime.catalog)&&runtime.catalog.length)return runtime.catalog;
+   if(runtime.catalogPromise)return runtime.catalogPromise;
+   runtime.catalogPromise=(async()=>{
+     const payload=await fetchJson(CATALOG_URL,8500);
+     const rows=extractList(payload).filter(x=>catalogStationNo(x)&&catalogName(x));
+     if(!rows.length)throw new Error('YouBike 場站清單沒有可用資料');
+     runtime.catalog=rows;return rows;
+   })();
+   try{return await runtime.catalogPromise;}finally{runtime.catalogPromise=null;}
+ }
+ function matchCatalog(spec,catalog){
+   const wanted=norm(spec?.name||spec?.station_name||'');
+   const wantedDistrict=norm(spec?.district||spec?.official_district||'');
+   if(!wanted)return null;
+   let exact=catalog.filter(x=>norm(catalogName(x))===wanted);
+   if(wantedDistrict){
+     const sameDistrict=exact.filter(x=>norm(catalogDistrict(x))===wantedDistrict);
+     if(sameDistrict.length)exact=sameDistrict;
+   }
+   if(exact.length===1)return exact[0];
+   const ranked=[];
+   for(const item of catalog){
+     const key=norm(catalogName(item));if(!key)continue;
+     const includes=wanted.length>=4&&key.length>=4&&(wanted.includes(key)||key.includes(wanted));
+     if(!includes)continue;
+     let score=Math.min(wanted.length,key.length)/Math.max(wanted.length,key.length);
+     if(wantedDistrict&&norm(catalogDistrict(item))===wantedDistrict)score+=0.15;
+     ranked.push({item,score});
+   }
+   ranked.sort((a,b)=>b.score-a.score);
+   if(!ranked.length||ranked[0].score<0.72)return null;
+   if(ranked.length>1&&ranked[1].score>=ranked[0].score-0.035)return null;
+   return ranked[0].item;
+ }
+ async function resolveSpec(spec){
+   if(String(spec?.station_no||'').trim())return spec;
+   const catalog=await loadCatalog(),matched=matchCatalog(spec,catalog);
+   if(!matched)throw new Error(spec?.match_error||('找不到 YouBike 場站：'+String(spec?.name||'')));
+   return {
+     ...spec,
+     station_no:catalogStationNo(matched),
+     official_name:catalogName(matched)||spec.name,
+     official_district:catalogDistrict(matched)||spec.district||'',
+     latitude:validCoord(matched?.lat??matched?.latitude??matched?.y,-90,90),
+     longitude:validCoord(matched?.lng??matched?.lon??matched?.longitude??matched?.x,-180,180),
+     match_error:''
+   };
+ }
  function normalizeBattery(payload){
    const bikes=[];
    for(const x of extractList(payload)){
@@ -217,16 +269,17 @@ def render_floating_server_battery(
  function pillarKey(v){const m=String(v??'').match(/\d+/);return m?Number(m[0]):Number.MAX_SAFE_INTEGER;}
  function pillarSort(a,b){const d=pillarKey(a.pillar_no)-pillarKey(b.pillar_no);return d||String(a.pillar_no||'').localeCompare(String(b.pillar_no||''),'zh-Hant',{numeric:true,sensitivity:'base'});}
  async function queryOne(spec,threshold,priority,force){
-   const stationNo=String(spec.station_no||'').trim();if(!stationNo)throw new Error(spec.match_error||'YouBike 站號尚未配對');
+   const resolved=await resolveSpec(spec);
+   const stationNo=String(resolved.station_no||'').trim();if(!stationNo)throw new Error(resolved.match_error||'YouBike 站號尚未配對');
    const cacheKey=stationNo,now=Date.now(),cached=runtime.cache.get(cacheKey);
-   const enrich=value=>({...value,latitude:validCoord(spec.latitude,-90,90),longitude:validCoord(spec.longitude,-180,180),requested_district:spec.district||spec.official_district||value.requested_district||'',official_district:spec.official_district||spec.district||value.official_district||''});
+   const enrich=value=>({...value,latitude:validCoord(resolved.latitude,-90,90),longitude:validCoord(resolved.longitude,-180,180),requested_district:resolved.district||resolved.official_district||value.requested_district||'',official_district:resolved.official_district||resolved.district||value.official_district||''});
    if(cached&&!force&&now-cached.at<FRESH_MS)return enrich({...cached.value,source:'memory_cache',age_seconds:(now-cached.at)/1000});
    let lastError=null;
    for(let attempt=0;attempt<2;attempt++){
      try{
-       const data=await fetchJson(`${BATTERY_URL}?station_no=${encodeURIComponent(stationNo)}`),bikes=normalizeBattery(data);
+       const data=await fetchJson(BATTERY_URL+'?station_no='+encodeURIComponent(stationNo)),bikes=normalizeBattery(data);
        const low=bikes.filter(b=>b.battery_power<=threshold).sort(pillarSort),pri=low.filter(b=>b.battery_power<=priority);
-       const value=enrich({requested_name:spec.name,station_name:spec.official_name||spec.name,station_no:stationNo,bikes,low_bikes:low,priority_bikes:pri,low_count:low.length,priority_count:pri.length,threshold,priority_threshold:priority,source:'live',age_seconds:0});
+       const value=enrich({requested_name:resolved.name,station_name:resolved.official_name||resolved.name,station_no:stationNo,bikes,low_bikes:low,priority_bikes:pri,low_count:low.length,priority_count:pri.length,threshold,priority_threshold:priority,source:'live',age_seconds:0});
        runtime.cache.set(cacheKey,{at:Date.now(),value});return value;
      }catch(e){lastError=e;if(attempt===0)await new Promise(r=>setTimeout(r,180));}
    }
