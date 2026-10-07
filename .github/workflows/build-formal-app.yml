@@ -9,6 +9,12 @@ on:
       - app_patch_legacy.py
       - legacy_ui.py
       - tools/build_formal_app.py
+      - live_status_ui.py
+      - battery_upgrade.py
+      - live_status_service.py
+      - battery_service.py
+      - background_refresh.py
+      - work_orders.py
       - .github/workflows/build-formal-app.yml
   workflow_dispatch:
 
@@ -32,10 +38,15 @@ jobs:
       - name: Build native integrated app
         run: python tools/build_formal_app.py
 
+      - name: Install runtime and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
       - name: Static verification
         run: |
           python -m py_compile app.py
-          python -m py_compile live_status_ui.py battery_upgrade.py live_status_service.py battery_service.py work_orders.py
+          python -m py_compile live_status_ui.py battery_upgrade.py live_status_service.py battery_service.py background_refresh.py work_orders.py
           python - <<'PY'
           from pathlib import Path
           text = Path("app.py").read_text(encoding="utf-8")
@@ -49,6 +60,9 @@ jobs:
               raise SystemExit("Formalization check failed: " + ", ".join(failed))
           print("Formal app verification passed.")
           PY
+
+      - name: Python test suite
+        run: pytest -q
 
       - name: Commit generated formal runtime
         run: |
