@@ -72,9 +72,22 @@ def render_background_live_status(stations, *, force=False, browser_fallback=Non
     st.session_state[state_key] = str((state.value or {}).get("event_id") or "")
     st.session_state[state_key + "::error"] = state.error
     _monitor(scope, state_key)
-    if state.error and browser_fallback is not None:
-        st.info("雲端即時車數連線未完成，已啟用瀏覽器直連備援；雲端仍會自動重試。")
+
+    # Fast race on cold start/manual refresh: the server request stays in the
+    # background while the user's browser requests YouBike in parallel. Whichever
+    # returns a usable payload first wins this render. If an old server snapshot
+    # already exists, keep showing it while background refresh continues.
+    should_race_browser = (
+        browser_fallback is not None
+        and (force or state.value is None or bool(state.error))
+    )
+    if should_race_browser:
+        if state.error:
+            st.info("雲端即時車數連線未完成，已同步啟用瀏覽器直連；原有車數會保留。")
+        elif state.value is None:
+            st.caption("正在同步即時車數：伺服器與手機瀏覽器同時查詢，先完成者先顯示。")
         browser_value = browser_fallback()
         if isinstance(browser_value, dict):
             return browser_value
+
     return state.value
