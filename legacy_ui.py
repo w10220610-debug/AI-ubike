@@ -11477,7 +11477,7 @@ if cache_expired:
 
 with st.sidebar:
     st.header("配置")
-    st.caption("系統版本：測試版")
+    st.caption("系統版本：V29 正式完整版")
 
     if st.session_state.pop("base_expired_notice", False):
         st.warning("原配置無法讀取，請重新上傳。")
