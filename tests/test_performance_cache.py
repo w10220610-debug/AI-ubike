@@ -84,8 +84,14 @@ def test_map_cache_same_request_single_build():
 
 
 def prepared_app():
-    """Apply every real compatibility patch, without executing the UI/network."""
-    path = Path(__file__).resolve().parents[1] / "app.py"
+    """Build the archived patcher namespace without executing the Streamlit UI.
+
+    The production app.py is now native-integrated. app_patch_legacy.py is kept
+    only as a migration fixture so compatibility behavior can still be regression
+    tested while the formal runtime stays free of dynamic patch/exec machinery.
+    """
+    root = Path(__file__).resolve().parents[1]
+    path = root / "app_patch_legacy.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     assert isinstance(tree.body[-1], ast.Expr)
     assert tree.body[-1].value.func.id == "exec"
@@ -93,6 +99,18 @@ def prepared_app():
     namespace = {"__file__": str(path), "__name__": "performance_test_app"}
     exec(compile(tree, str(path), "exec"), namespace)
     return namespace
+
+
+def test_formal_app_is_native_integrated():
+    path = Path(__file__).resolve().parents[1] / "app.py"
+    source = path.read_text(encoding="utf-8")
+    compile(source, str(path), "exec")
+    assert 'FORMAL_APP_ARCHITECTURE = "native-integrated-v29"' in source
+    assert "def replace_exact(" not in source
+    assert "LEGACY_APP.read_text" not in source
+    assert "exec(compile_legacy_source" not in source
+    assert "render_priority_station_manager(" in source
+    assert "v29_server_live_force_refresh" in source
 
 
 def test_all_compatibility_patches_and_final_compile():
