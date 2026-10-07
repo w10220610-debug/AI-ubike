@@ -11,6 +11,7 @@ legacy UI. The generated app.py contains no runtime source rewriting or exec().
 import ast
 from pathlib import Path
 import shutil
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,8 +87,52 @@ def _extract_support_source(patcher_source: str, tree: ast.Module) -> str:
     return "".join(chunks)
 
 
+def _static_env(tree: ast.Module) -> dict[str, object]:
+    sys.path.insert(0, str(ROOT))
+    from battery_icon_data import BATTERY_ICON_DATA_URI
+
+    env: dict[str, object] = {"BATTERY_ICON_DATA_URI": BATTERY_ICON_DATA_URI}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+        try:
+            env[target.id] = _eval_static(node.value, env)
+        except Exception:
+            continue
+    return env
+
+
+def _eval_static(node: ast.AST, env: dict[str, object]):
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name) and node.id in env:
+        return env[node.id]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _eval_static(node.left, env) + _eval_static(node.right, env)
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant):
+                parts.append(str(value.value))
+            elif isinstance(value, ast.FormattedValue):
+                parts.append(str(_eval_static(value.value, env)))
+            else:
+                raise ValueError("unsupported f-string node")
+        return "".join(parts)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        base = _eval_static(node.func.value, env)
+        args = [_eval_static(arg, env) for arg in node.args]
+        if node.func.attr == "replace" and isinstance(base, str):
+            return base.replace(*args)
+    raise ValueError(f"unsupported static expression: {ast.dump(node, include_attributes=False)}")
+
+
 def _apply_replace_patches(patcher_source: str, tree: ast.Module, legacy_source: str) -> tuple[str, int]:
     patch_count = 0
+    env = _static_env(tree)
     for node in tree.body:
         if not _is_replace_call(node):
             continue
@@ -95,11 +140,11 @@ def _apply_replace_patches(patcher_source: str, tree: ast.Module, legacy_source:
         if len(call.args) < 2:
             raise RuntimeError(f"replace_exact at line {node.lineno} has too few args")
         try:
-            old = ast.literal_eval(call.args[0])
-            new = ast.literal_eval(call.args[1])
+            old = _eval_static(call.args[0], env)
+            new = _eval_static(call.args[1], env)
         except Exception as exc:
             raise RuntimeError(
-                f"replace_exact at line {node.lineno} is not literal-only: {exc}"
+                f"replace_exact at line {node.lineno} is not statically evaluable: {exc}"
             ) from exc
         if not isinstance(old, str) or not isinstance(new, str):
             raise RuntimeError(f"replace_exact at line {node.lineno} must use strings")
