@@ -4,6 +4,7 @@ on:
     branches: [v29-old-ui]
     paths:
       - 'battery_upgrade.py'
+      - 'app.py'
       - 'tests/battery_browser_syntax.cjs'
       - '.github/workflows/battery-regression.yml'
   pull_request:
@@ -17,4 +18,4 @@ jobs:
         with:
           node-version: '22'
       - run: node tests/battery_browser_syntax.cjs
-      - run: python -m py_compile battery_upgrade.py
+      - run: python -m py_compile app.py battery_upgrade.py
