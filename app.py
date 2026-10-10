@@ -6447,6 +6447,51 @@ def _build_floating_battery_query_html(
         #ubike-battery-page .battery-bike-list {border-top-color:rgba(85,246,255,.14);}
         #ubike-battery-page .battery-bike-row {color:#c1d9e1; border-bottom-color:rgba(85,246,255,.10); background:rgba(0,0,0,.10);}
         #ubike-battery-page .battery-bike-row.priority {background:rgba(255,63,207,.13); box-shadow:inset 4px 0 #ff3fcf;}
+        /* V29-compatible per-station reverse view, distinct green color */
+        #ubike-battery-page .battery-reverse-toggle {
+          flex: 0 0 42px;
+          min-width: 42px;
+          min-height: 38px;
+          border: 1px solid rgba(85,246,255,.55);
+          border-radius: 11px;
+          color: #7ff9ff;
+          background: rgba(85,246,255,.1);
+          font-size: 21px;
+          font-weight: 900;
+          cursor: pointer;
+          touch-action: manipulation;
+        }
+        #ubike-battery-page .battery-reverse-toggle[aria-pressed="true"] {
+          color: #052219;
+          border-color: #6cf5aa;
+          background: #6cf5aa;
+        }
+        #ubike-battery-page .battery-station.reverse,
+        #ubike-battery-page .battery-station.reverse.priority {
+          border-color: #43dc91;
+          background: linear-gradient(135deg, rgba(7,53,38,.96), rgba(4,30,30,.96));
+          box-shadow: inset 4px 0 #43dc91, 0 0 15px rgba(67,220,145,.13);
+        }
+        #ubike-battery-page .battery-station.reverse .battery-count {
+          color: #99ffbf;
+          background: rgba(67,220,145,.16);
+        }
+        #ubike-battery-page .battery-station.reverse .battery-bike-row,
+        #ubike-battery-page .battery-station.reverse .battery-bike-row.priority {
+          background: rgba(67,220,145,.08);
+          box-shadow: inset 3px 0 rgba(67,220,145,.5);
+        }
+        #ubike-battery-page .battery-station.reverse .battery-power {
+          color: #9effbd;
+          text-shadow: 0 0 8px rgba(67,220,145,.17);
+        }
+        #ubike-battery-page .battery-reverse-banner {
+          padding: 11px 13px;
+          color: #a4ffd1;
+          background: rgba(67,220,145,.16);
+          font-size: 13px;
+          font-weight: 850;
+        }
         #ubike-battery-page .battery-bike-no {color:#effcff;}
         #ubike-battery-page .battery-power {color:#ff75d7; text-shadow:0 0 8px rgba(255,63,207,.16);}
         #ubike-battery-page .battery-empty {color:#829da8;}
@@ -6563,6 +6608,8 @@ def _build_floating_battery_query_html(
       let catalogCache = null;
       let lastResults = [];
       let lastResultRoutes = [];
+      // Reversing a station is a UI-only view; original low-battery totals are unchanged.
+      const reverseStations = new Set();
       let userLocation = null;
       let locationPromise = null;
       let locationError = "";
@@ -7016,26 +7063,33 @@ def _build_floating_battery_query_html(
             );
           });
       }
-      function renderStationCard(item, threshold, mode, isRecommended) {
+      function compareBatteryPillars(left, right) {
+        const leftPillar = String(left.pillar_no || "").trim();
+        const rightPillar = String(right.pillar_no || "").trim();
+        if (!leftPillar && rightPillar) return 1;
+        if (leftPillar && !rightPillar) return -1;
+        return leftPillar.localeCompare(rightPillar, "zh-Hant", { numeric: true, sensitivity: "base" })
+          || String(left.bike_no || "").localeCompare(String(right.bike_no || ""), "zh-Hant", { numeric: true });
+      }
+      function stationReverseKey(result) {
+        return JSON.stringify([result.route || "", result.name || "", result.stationNo || ""]);
+      }
+      function renderStationCard(item, threshold, mode, isRecommended, expandedKeys = new Set()) {
         const { result, distance } = item;
         const priorityThreshold = clampPriorityThreshold(priorityThresholdInput.value);
         const isPriority = prioritySortingEnabled() && item.priorityCount > 0;
-        const lowBikes = lowBikesFor(result, threshold).sort((left, right) => {
-          const leftPillar = String(left.pillar_no || "").trim();
-          const rightPillar = String(right.pillar_no || "").trim();
-          if (!leftPillar && rightPillar) return 1;
-          if (leftPillar && !rightPillar) return -1;
-          return leftPillar.localeCompare(
-            rightPillar,
-            "zh-Hant",
-            { numeric: true, sensitivity: "base" },
-          ) || left.bike_no.localeCompare(right.bike_no, "zh-Hant", { numeric: true });
-        });
+        const lowBikes = lowBikesFor(result, threshold).sort(compareBatteryPillars);
+        const safeBikes = (Array.isArray(result.bikes) ? result.bikes : [])
+          .filter(bike => bike.battery_power > threshold)
+          .sort(compareBatteryPillars);
         // 防禦性檢查：即使上游資料改變，也絕不建立 0 顆場站卡片。
         if (!result.matched || !lowBikes.length) return;
 
+        const stationKey = stationReverseKey(result);
         const details = doc.createElement("details");
         details.className = "battery-station";
+        details.dataset.stationKey = stationKey;
+        details.open = expandedKeys.has(stationKey);
         details.classList.toggle("priority", isPriority);
         const summary = doc.createElement("summary");
         const heading = doc.createElement("span");
@@ -7066,34 +7120,61 @@ def _build_floating_battery_query_html(
         heading.appendChild(meta);
         summary.appendChild(heading);
 
-        const count = appendTextElement(
-          summary,
-          "span",
-          "battery-count",
-          `需換 ${lowBikes.length} 顆`,
-        );
-        count.classList.add("needs-change");
+        const reverseButton = doc.createElement("button");
+        reverseButton.className = "battery-reverse-toggle";
+        reverseButton.type = "button";
+        reverseButton.textContent = "⇄";
+        reverseButton.setAttribute("aria-label", "切換本場站需換與不用換電池明細");
+        summary.appendChild(reverseButton);
+        const count = appendTextElement(summary, "span", "battery-count", `需換 ${lowBikes.length} 顆`);
         details.appendChild(summary);
 
         const list = doc.createElement("div");
         list.className = "battery-bike-list";
-        for (const bike of lowBikes) {
-          const row = doc.createElement("div");
-          row.className = "battery-bike-row";
-          const isPriorityBike = isPriority && bike.battery_power <= priorityThreshold;
-          row.classList.toggle("priority", isPriorityBike);
-          appendTextElement(row, "span", "battery-bike-no", `車號 ${bike.bike_no}`);
-          appendTextElement(
-            row,
-            "span",
-            "battery-power",
-            `${bike.battery_power}%${isPriorityBike ? " ⚠️" : ""}`,
-          );
-          appendTextElement(row, "span", "", bike.pillar_no ? `柱號 ${bike.pillar_no}` : "柱號 —");
-          list.appendChild(row);
+        function updateStationBikeView() {
+          const reversed = reverseStations.has(stationKey);
+          const visibleBikes = reversed ? safeBikes : lowBikes;
+          details.classList.toggle("reverse", reversed);
+          count.classList.toggle("needs-change", !reversed);
+          count.textContent = reversed ? `不用換 ${safeBikes.length} 台` : `需換 ${lowBikes.length} 顆`;
+          reverseButton.setAttribute("aria-pressed", String(reversed));
+          reverseButton.title = reversed ? "恢復顯示需要更換的電池" : "反向查看不用換電池的車輛";
+          list.replaceChildren();
+          if (reversed) {
+            appendTextElement(list, "div", "battery-reverse-banner",
+              `✅ 反向模式｜以下車輛電量高於 ${threshold}%，不需要換電池`);
+          }
+          if (reversed && !visibleBikes.length) {
+            appendTextElement(list, "div", "battery-empty", "本場站沒有高於更換門檻的車輛。");
+          }
+          for (const bike of visibleBikes) {
+            const row = doc.createElement("div");
+            row.className = "battery-bike-row";
+            const isPriorityBike = !reversed && isPriority && bike.battery_power <= priorityThreshold;
+            row.classList.toggle("priority", isPriorityBike);
+            appendTextElement(row, "span", "battery-bike-no", `車號 ${bike.bike_no}`);
+            appendTextElement(row, "span", "battery-power",
+              `${bike.battery_power}%${isPriorityBike ? " ⚠️" : ""}`);
+            appendTextElement(row, "span", "", bike.pillar_no ? `柱號 ${bike.pillar_no}` : "柱號 —");
+            list.appendChild(row);
+          }
         }
+        reverseButton.addEventListener("click", event => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (reverseStations.has(stationKey)) reverseStations.delete(stationKey);
+          else reverseStations.add(stationKey);
+          updateStationBikeView();
+          details.open = true;
+        });
+        reverseButton.addEventListener("keydown", event => {
+          if (event.key === "Enter" || event.key === " ") event.stopPropagation();
+        });
+        updateStationBikeView();
         details.appendChild(list);
         resultsNode.appendChild(details);
+      }
+      function renderResults() {        resultsNode.appendChild(details);
       }
       function renderResults() {
         const threshold = clampThreshold(thresholdInput.value);
@@ -7101,6 +7182,11 @@ def _build_floating_battery_query_html(
         const priorityThreshold = clampPriorityThreshold(priorityThresholdInput.value);
         priorityThresholdInput.value = String(priorityThreshold);
         const priorityEnabled = prioritySortingEnabled();
+        // Preserve expanded station cards when data is progressively refreshed.
+        const expandedKeys = new Set(
+          Array.from(resultsNode.querySelectorAll("details.battery-station[open]"))
+            .map(node => node.dataset.stationKey).filter(Boolean),
+        );
         summaryNode.replaceChildren();
         districtSummaryGridNode.replaceChildren();
         districtSummaryNode.hidden = true;
@@ -7203,7 +7289,7 @@ def _build_floating_battery_query_html(
             ? group.items.findIndex(item => Number.isFinite(item.distance) && item.result.matched)
             : -1;
           group.items.forEach((item, index) => {
-            renderStationCard(item, threshold, group.mode, index === recommendedIndex);
+            renderStationCard(item, threshold, group.mode, index === recommendedIndex, expandedKeys);
           });
         }
         savePreferences();
