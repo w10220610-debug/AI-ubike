@@ -1,0 +1,20 @@
+name: V29 Battery Script Regression
+on:
+  push:
+    branches: [v29-old-ui]
+    paths:
+      - 'battery_upgrade.py'
+      - 'tests/battery_browser_syntax.cjs'
+      - '.github/workflows/battery-regression.yml'
+  pull_request:
+    branches: [v29-old-ui]
+jobs:
+  battery-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node tests/battery_browser_syntax.cjs
+      - run: python -m py_compile battery_upgrade.py
