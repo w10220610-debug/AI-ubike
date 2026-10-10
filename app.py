@@ -4109,6 +4109,7 @@ def _build_floating_station_search_html(
             const results = root.querySelector(".uft-results");
 
             function openBatteryQuery() {{
+                let openError = "";
                 try {{
                     const batteryRuntime = win.__ubikeV29FastBattery;
                     batteryRuntime?.repairFloatingButton?.();
@@ -4117,15 +4118,19 @@ def _build_floating_station_search_html(
                         batteryRuntime.openBatteryQuery();
                         return;
                     }}
-                }} catch (_) {{}}
+                }} catch (error) {{
+                    openError = String(error?.message || error || "未知錯誤");
+                }}
 
-                // Battery component may mount after the floating toolbar.
-                // Keep this click request until the battery engine consumes it.
+                // Queue a click if the battery iframe has not mounted yet.
+                // Display real failures instead of silently hiding them.
                 win.__ubikeBatteryOpenPending = true;
                 try {{
                     doc.dispatchEvent(new CustomEvent("ubike:open-battery"));
                 }} catch (_) {{}}
-                showToast("正在啟動電池查詢…");
+                showToast(openError
+                    ? `電池查詢啟動失敗：${{openError}}`
+                    : "正在啟動電池查詢…");
             }}
 
             function isMobileLayout() {{
@@ -4514,6 +4519,12 @@ st.set_page_config(
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
 
+**2026/10/11｜電池查詢可靠性修復（BUG，不計功能升版）**
+- 修復電池介面 JavaScript 的錯誤換行，恢復懸浮按鈕開啟功能。
+- 伺服器場站表準備中仍可走瀏覽器端配對；API 出錯時顯示五分鐘內有效的電池備援資料。
+- 修正更改電量門檻後快取計算、重新掛載時舊請求覆蓋新結果，以及查詢期間重複重設樣式的問題。
+- 開啟懸浮電池視窗時若遇例外，會顯示具體錯誤原因以便排查。
+
 **2026/10/08｜V29 正式完整版架構整合與效能加速**
 - 將原本「legacy_ui.py ＋ 48 個 replace_exact() 動態修補 ＋ compile/exec」改為正式整合的原生 app.py；執行時不再讀取舊 UI 原始碼、不再動態改字串、不再二次編譯後 exec。
 - 保留一般分析、智慧調度、優先場站、派工、定位、電池與右側懸浮工具等既有功能；legacy_ui.py 與舊 patcher 只作遷移備份／回歸測試，不參與正式執行。
@@ -4593,6 +4604,12 @@ _UPDATE_CONTENT_MD = f"""
 _BUG_FIX_CONTENT_MD = """
 #### 🐞 BUG 修復紀錄
 > 僅記錄已實際完成的修復；單純新增功能不列入。
+
+**2026/10/11｜懸浮電池按鈕無法開啟／電量查詢備援不顯示**
+- 移除新版電池 JavaScript 內誤植的字面換行字元，修正啟動時的 SyntaxError。
+- 放行場站清單尚未就緒時的瀏覽器直連配對，讓查詢功能不必等待 Server 配對完成。
+- 失敗時改以提示顯示舊資料來源，不再因為舊資料帶有錯誤欄位而被當作無結果。
+- 避免 Streamlit rerun 時舊查詢覆寫新結果；快取依本次門檻重新計算，減少重複 CSS 更新。
 
 **2026/10/08｜即時車數與電池偶發長時間等待**
 - 修正冷啟動時必須先等待雲端 Server 失敗才切換手機備援的流程；現在兩條路徑可並行，避免 Server 連 YouBike 慢時拖住現場操作。
