@@ -159,11 +159,16 @@ def render_floating_server_battery(
  const args=__ARGS__;
  const win=window.parent, doc=win.document;
  const ROOT='ubike-battery-v29-upgrade';
- const CATALOG_URL='https://apis.youbike.com.tw/json/station-min-yb2.json';\n const BATTERY_URL='https://apis.youbike.com.tw/api/front/bike/lists';
+ const CATALOG_URL='https://apis.youbike.com.tw/json/station-min-yb2.json';
+ const BATTERY_URL='https://apis.youbike.com.tw/api/front/bike/lists';
  const FRESH_MS=30000, STALE_MS=300000, CONCURRENCY=8, REQUEST_TIMEOUT_MS=8500;
  const PREF_VERSION=5, LOCATION_WATCH_VERSION=3;
  const runtime=win.__ubikeV29FastBattery||(win.__ubikeV29FastBattery={cache:new Map(),run:0});
- if(!(runtime.cache instanceof Map))runtime.cache=new Map();\n if(!Array.isArray(runtime.catalog))runtime.catalog=null;\n if(!runtime.catalogPromise)runtime.catalogPromise=null;
+ // Ignore obsolete workers from previous Streamlit iframe mounts.
+ runtime.run=Number.isFinite(runtime.run)?runtime.run+1:1;
+ if(!(runtime.cache instanceof Map))runtime.cache=new Map();
+ if(!Array.isArray(runtime.catalog))runtime.catalog=null;
+ if(!runtime.catalogPromise)runtime.catalogPromise=null;
  if(!runtime.locationState)runtime.locationState={lat:null,lon:null,accuracy:null,updatedAt:0,error:'',watchId:null,watchVersion:0};
  if(!runtime.currentResults||typeof runtime.currentResults!=='object'||Array.isArray(runtime.currentResults))runtime.currentResults={};
  const currentResults=runtime.currentResults;
@@ -268,12 +273,18 @@ def render_floating_server_battery(
  }
  function pillarKey(v){const m=String(v??'').match(/\d+/);return m?Number(m[0]):Number.MAX_SAFE_INTEGER;}
  function pillarSort(a,b){const d=pillarKey(a.pillar_no)-pillarKey(b.pillar_no);return d||String(a.pillar_no||'').localeCompare(String(b.pillar_no||''),'zh-Hant',{numeric:true,sensitivity:'base'});}
+ function applyThresholds(record,threshold,priority){
+   const bikes=Array.isArray(record?.bikes)?record.bikes:[];
+   const low=bikes.filter(b=>num(b.battery_power,101)<=threshold).slice().sort(pillarSort);
+   const urgent=low.filter(b=>num(b.battery_power,101)<=priority);
+   return {...record,low_bikes:low,priority_bikes:urgent,low_count:low.length,priority_count:urgent.length,threshold,priority_threshold:priority};
+ }
  async function queryOne(spec,threshold,priority,force){
    const resolved=await resolveSpec(spec);
    const stationNo=String(resolved.station_no||'').trim();if(!stationNo)throw new Error(resolved.match_error||'YouBike 站號尚未配對');
    const cacheKey=stationNo,now=Date.now(),cached=runtime.cache.get(cacheKey);
    const enrich=value=>({...value,latitude:validCoord(resolved.latitude,-90,90),longitude:validCoord(resolved.longitude,-180,180),requested_district:resolved.district||resolved.official_district||value.requested_district||'',official_district:resolved.official_district||resolved.district||value.official_district||''});
-   if(cached&&!force&&now-cached.at<FRESH_MS)return enrich({...cached.value,source:'memory_cache',age_seconds:(now-cached.at)/1000});
+   if(cached&&!force&&now-cached.at<FRESH_MS)return applyThresholds(enrich({...cached.value,source:'memory_cache',age_seconds:(now-cached.at)/1000,error:''}),threshold,priority);
    let lastError=null;
    for(let attempt=0;attempt<2;attempt++){
      try{
@@ -283,7 +294,7 @@ def render_floating_server_battery(
        runtime.cache.set(cacheKey,{at:Date.now(),value});return value;
      }catch(e){lastError=e;if(attempt===0)await new Promise(r=>setTimeout(r,180));}
    }
-   if(cached&&now-cached.at<STALE_MS)return enrich({...cached.value,source:'stale_cache',age_seconds:(now-cached.at)/1000,error:String(lastError?.message||lastError)});
+   if(cached&&now-cached.at<STALE_MS)return applyThresholds(enrich({...cached.value,source:'stale_cache',age_seconds:(now-cached.at)/1000,error:'',warning:String(lastError?.message||lastError)}),threshold,priority);
    throw lastError||new Error('電池資料查詢失敗');
  }
  function lowMin(r){const lows=Array.isArray(r.low_bikes)?r.low_bikes:[];return lows.length?Math.min(...lows.map(b=>num(b.battery_power,101))):101;}
@@ -345,7 +356,7 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
    const fab=root.querySelector('#ub-v29-fab'),page=root.querySelector('#ub-v29-page'),closeButton=root.querySelector('#ub-v29-close');
    fab.onclick=open;closeButton.onclick=close;
    if(!page.classList.contains('open')){fab.style.display='flex';fab.style.visibility='visible';fab.style.opacity='1';fab.style.pointerEvents='auto';fab.hidden=false;fab.removeAttribute('aria-hidden');}
-   let style=doc.getElementById(ROOT+'-style');if(!style){style=doc.createElement('style');style.id=ROOT+'-style';doc.head.appendChild(style);}style.textContent=styleText();
+   let style=doc.getElementById(ROOT+'-style');if(!style){style=doc.createElement('style');style.id=ROOT+'-style';doc.head.appendChild(style);}const css=styleText();if(style.textContent!==css)style.textContent=css;
    return root;
  }
  function updateLocationUi(){
@@ -401,11 +412,11 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
  }
  function summarize(done,total,failed){const vals=Object.values(currentResults).filter(r=>r&&!r.error),lowStations=vals.filter(r=>num(r.low_count)>0).length,lowBikes=vals.reduce((s,r)=>s+num(r.low_count),0),urgent=vals.reduce((s,r)=>s+num(r.priority_count),0),root=ensure();root.querySelector('#ub-summary').innerHTML=`<span class="chip">完成 ${done}/${total}</span><span class="chip">需換場站 ${lowStations}</span><span class="chip">需換 ${lowBikes} 顆</span>${urgent?`<span class="chip hot">緊急 ${urgent} 顆</span>`:''}${failed?`<span class="chip hot">失敗 ${failed}</span>`:''}`;refreshViews();root.querySelector('#ub-progress').style.width=`${total?Math.round(done/total*100):0}%`;}
  async function runQuery(force){
-   if(args.catalog_pending){const status=ensure().querySelector('#ub-status');if(status)status.textContent=args.catalog_error||'場站清單正在準備，請稍後查詢。';return;}
+   // Browser station-number fallback remains active while server catalog loads.
    if(running)return;const root=ensure(),map=args.route_station_map||{},selected=[...root.querySelectorAll('[data-zone]:checked')].map(x=>x.value),status=root.querySelector('#ub-status');if(!selected.length){status.textContent='請至少選擇一個範圍';return;}
    const th=Math.max(0,Math.min(100,num(root.querySelector('#ub-th').value,89))),pr=Math.max(0,Math.min(th,num(root.querySelector('#ub-pr').value,69))),pe=root.querySelector('#ub-pe').checked;savePrefs({zones:selected,threshold:th,priority_threshold:pr,priority_enabled:pe,pref_version:PREF_VERSION});
    const specs=[],seen=new Set();for(const z of selected)for(const item of (map[z]||[])){if(!item?.name||seen.has(item.name))continue;seen.add(item.name);specs.push(item);}for(const key of Object.keys(currentResults))delete currentResults[key];running=true;runtime.run+=1;const runId=runtime.run;let index=0,done=0,failed=0;root.querySelectorAll('#ub-query,#ub-force').forEach(b=>b.disabled=true);status.textContent=`正在查詢 ${specs.length} 個場站…`;summarize(0,specs.length,0);
-   async function worker(){while(index<specs.length&&runId===runtime.run){const spec=specs[index++];try{currentResults[spec.name]=await queryOne(spec,th,pr,force);}catch(e){failed++;currentResults[spec.name]={requested_name:spec.name,requested_district:spec.district||spec.official_district||'',official_district:spec.official_district||'',latitude:validCoord(spec.latitude,-90,90),longitude:validCoord(spec.longitude,-180,180),error:String(e?.message||e),low_count:0,priority_count:0};}finally{done++;status.textContent=`查詢中：${done}/${specs.length}｜失敗 ${failed}`;summarize(done,specs.length,failed);}}}
+   async function worker(){while(index<specs.length&&runId===runtime.run){const spec=specs[index++];try{const value=await queryOne(spec,th,pr,force);if(runId!==runtime.run)return;currentResults[spec.name]=value;}catch(e){if(runId!==runtime.run)return;failed++;currentResults[spec.name]={requested_name:spec.name,requested_district:spec.district||spec.official_district||'',official_district:spec.official_district||'',latitude:validCoord(spec.latitude,-90,90),longitude:validCoord(spec.longitude,-180,180),error:String(e?.message||e),low_count:0,priority_count:0};}finally{if(runId===runtime.run){done++;status.textContent=`查詢中：${done}/${specs.length}｜失敗 ${failed}`;summarize(done,specs.length,failed);}}}}
    await Promise.all(Array.from({length:Math.min(CONCURRENCY,specs.length)},worker));if(runId!==runtime.run)return;running=false;status.textContent=`查詢完成：${done-failed} 站成功${failed?`｜${failed} 站未取得`:''}`;root.querySelector('#ub-updated').textContent=`最後更新：${new Date().toLocaleString('zh-TW',{hour12:false})}`;root.querySelectorAll('#ub-query,#ub-force').forEach(b=>b.disabled=false);summarize(done,specs.length,failed);
  }
  function repairFloatingButton(){
@@ -473,7 +484,7 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
    });
    runtime.safeUiObserver.observe(doc.documentElement,{childList:true,subtree:true});
  }catch(_){}
- stopLocationWatch();ensure();render();repairFloatingButton();
+ const wasOpen=Boolean(doc.getElementById(ROOT)?.querySelector('#ub-v29-page.open'));stopLocationWatch();ensure();render();repairFloatingButton();if(wasOpen)startLocationWatch();
 })();
 </script></body></html>'''.replace('__ARGS__', payload)
     st.iframe(html_text, height=1, tab_index=-1)
