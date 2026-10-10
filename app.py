@@ -7174,8 +7174,6 @@ def _build_floating_battery_query_html(
         details.appendChild(list);
         resultsNode.appendChild(details);
       }
-      function renderResults() {        resultsNode.appendChild(details);
-      }
       function renderResults() {
         const threshold = clampThreshold(thresholdInput.value);
         thresholdInput.value = String(threshold);
