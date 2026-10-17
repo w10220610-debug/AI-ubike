@@ -3598,7 +3598,7 @@ def render_low_battery_threshold_controls(
     with st.container(border=True):
         st.markdown(
             f"**⚡ {page_mode}｜低電量柱號門檻**  "
-            "\n第二門檻只做紅色警示，不會改變智慧調度推薦分數或順序。"
+            "\n一般分析直接顯示第二門檻柱號；第一門檻按「查低電量柱號」才展開。不影響智慧調度推薦分數或順序。"
         )
         threshold_col, priority_col = st.columns(2)
         with threshold_col:
@@ -4519,6 +4519,11 @@ st.set_page_config(
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
 
+**2026/10/17｜一般分析第二門檻柱號直接顯示**
+- 場站列表背景分批查詢電池，直接顯示低於或等於第二門檻的紅色柱號；無符合車輛時顯示「無」，查詢失敗則明確提示並可重試。
+- 第一門檻維持按「查低電量柱號」後才展開；智慧調度維持原有自動顯示。
+- 沿用電池快取與手機並行上限，更新按鈕保留目前展開狀態。
+
 **2026/10/11｜電池查詢可靠性修復（BUG，不計功能升版）**
 - 修復電池介面 JavaScript 的錯誤換行，恢復懸浮按鈕開啟功能。
 - 伺服器場站表準備中仍可走瀏覽器端配對；API 出錯時顯示五分鐘內有效的電池備援資料。
@@ -4604,6 +4609,9 @@ _UPDATE_CONTENT_MD = f"""
 _BUG_FIX_CONTENT_MD = """
 #### 🐞 BUG 修復紀錄
 > 僅記錄已實際完成的修復；單純新增功能不列入。
+
+**2026/10/17｜柱號查詢競態防護**
+- 同站重新查詢後，較早的成功或失敗回應不再覆蓋較新的結果；舊頁面的背景佇列在切頁後停止。
 
 **2026/10/11｜懸浮電池按鈕無法開啟／電量查詢備援不顯示**
 - 移除新版電池 JavaScript 內誤植的字面換行字元，修正啟動時的 SyntaxError。
@@ -6776,7 +6784,7 @@ def _build_inline_low_battery_pillars_html(
     auto_query: bool,
     force_station: str = "",
 ) -> str:
-    """建立主頁柱號查詢元件；智慧調度自動查，一般分析按站查。"""
+    """建立主頁柱號元件；一般分析自動顯示第二門檻，第一門檻按站展開。"""
     specs = [
         {"name": name, "kind": kind, "target": target}
         for name, kind, target in station_specs
@@ -6864,6 +6872,19 @@ def _build_inline_low_battery_pillars_html(
         }
         return null;
       }
+      function appendExpandButton(wrapper, stationName) {
+        if (wrapper.dataset.expanded !== "false") return;
+        const button = doc.createElement("button");
+        button.type = "button";
+        button.textContent = "⚡ 查低電量柱號";
+        button.addEventListener("click", event => {
+          event.preventDefault();
+          event.stopPropagation();
+          for (const target of wrappersFor(stationName)) target.dataset.expanded = "true";
+          queryStation(stationName, true);
+        });
+        wrapper.appendChild(button);
+      }
       function registerWrapper(stationName, host, { manual = false } = {}) {
         if (!host || Array.from(host.children || []).some(
           child => child.classList?.contains("ubike-inline-battery"),
@@ -6871,22 +6892,12 @@ def _build_inline_low_battery_pillars_html(
         const wrapper = doc.createElement("div");
         wrapper.className = "ubike-inline-battery";
         wrapper.dataset.stationName = stationName;
-        if (manual) {
-          const button = doc.createElement("button");
-          button.type = "button";
-          button.textContent = "⚡ 查低電量柱號";
-          button.addEventListener("click", event => {
-            event.preventDefault();
-            event.stopPropagation();
-            queryStation(stationName, true);
-          });
-          wrapper.appendChild(button);
-        } else {
-          const label = doc.createElement("span");
-          label.className = "ubike-battery-label";
-          label.textContent = "⚡ 柱號準備中…";
-          wrapper.appendChild(label);
-        }
+        wrapper.dataset.expanded = manual ? "false" : "true";
+        const label = doc.createElement("span");
+        label.className = "ubike-battery-label";
+        label.textContent = manual ? "⚠ 第二門檻柱號準備中…" : "⚡ 柱號準備中…";
+        wrapper.appendChild(label);
+        appendExpandButton(wrapper, stationName);
         host.appendChild(wrapper);
         const normalized = service.normalizeStationName(stationName);
         if (!wrappersByName.has(normalized)) wrappersByName.set(normalized, []);
@@ -6916,8 +6927,10 @@ def _build_inline_low_battery_pillars_html(
           wrapper.replaceChildren();
           const label = doc.createElement("span");
           label.className = "ubike-battery-label";
-          label.textContent = "⚡ 正在讀取柱號…";
+          label.textContent = wrapper.dataset.expanded === "false"
+            ? "⚠ 第二門檻讀取中…" : "⚡ 正在讀取柱號…";
           wrapper.appendChild(label);
+          appendExpandButton(wrapper, stationName);
         }
       }
       function formatPillar(value) {
@@ -6950,14 +6963,19 @@ def _build_inline_low_battery_pillars_html(
           wrapper.classList.remove("is-error", "is-empty");
           const label = doc.createElement("span");
           label.className = "ubike-battery-label";
-          if (!lowBikes.length) {
+          const collapsed = wrapper.dataset.expanded === "false";
+          const visibleThreshold = collapsed ? priorityThreshold : threshold;
+          const visibleBikes = lowBikes.filter(bike => bike.battery_power <= visibleThreshold);
+          if (!visibleBikes.length) {
             wrapper.classList.add("is-empty");
-            label.textContent = `目前沒有低於 ${threshold}% 的柱號`;
+            label.textContent = collapsed
+              ? `第二門檻 ≤${priorityThreshold}%：無`
+              : `目前沒有低於或等於 ${threshold}% 的柱號`;
             wrapper.appendChild(label);
           } else {
-            label.textContent = `≤${threshold}%：`;
+            label.textContent = `${collapsed ? "⚠ 第二門檻 " : ""}≤${visibleThreshold}%：`;
             wrapper.appendChild(label);
-            for (const bike of lowBikes) {
+            for (const bike of visibleBikes) {
               const pillar = doc.createElement("span");
               pillar.className = "ubike-pillar";
               const urgent = bike.battery_power <= priorityThreshold;
@@ -6966,6 +6984,7 @@ def _build_inline_low_battery_pillars_html(
               wrapper.appendChild(pillar);
             }
           }
+          appendExpandButton(wrapper, stationName);
           const refresh = doc.createElement("button");
           refresh.type = "button";
           refresh.className = "ubike-battery-refresh";
@@ -6997,10 +7016,15 @@ def _build_inline_low_battery_pillars_html(
             queryStation(stationName, true);
           });
           wrapper.appendChild(retry);
+          appendExpandButton(wrapper, stationName);
         }
       }
+      const requestVersions = new Map();
       async function queryStation(stationName, force = false) {
         if (win.__ubikeInlineBatteryGeneration !== generation) return;
+        const key = service.normalizeStationName(stationName);
+        const version = (requestVersions.get(key) || 0) + 1;
+        requestVersions.set(key, version);
         setLoading(stationName);
         try {
           const result = await service.queryStationByName(stationName, {
@@ -7009,9 +7033,9 @@ def _build_inline_low_battery_pillars_html(
             attempts: requestIsMobile ? 3 : 2,
             timeoutMs: requestIsMobile ? 15000 : 12000,
           });
-          renderResult(stationName, result);
+          if (requestVersions.get(key) === version) renderResult(stationName, result);
         } catch (_) {
-          renderError(stationName);
+          if (requestVersions.get(key) === version) renderError(stationName);
         }
       }
       async function runAutomaticQueries() {
@@ -7030,6 +7054,7 @@ def _build_inline_low_battery_pillars_html(
         );
         async function worker() {
           while (nextIndex < uniqueStations.length) {
+            if (win.__ubikeInlineBatteryGeneration !== generation) return;
             const stationName = uniqueStations[nextIndex++];
             const force = service.normalizeStationName(stationName)
               === service.normalizeStationName(forceStation);
@@ -7045,7 +7070,7 @@ def _build_inline_low_battery_pillars_html(
       attachTargets();
       win.setTimeout(attachTargets, 120);
       win.setTimeout(attachTargets, 420);
-      if (autoQuery && specs.length) win.setTimeout(runAutomaticQueries, 480);
+      if (specs.length) win.setTimeout(runAutomaticQueries, 480);
     })();
     </script>
     """
