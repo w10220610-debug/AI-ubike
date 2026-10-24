@@ -72,7 +72,7 @@ def test_import_found_vehicle_keeps_missing_vehicle_for_retry():
         if 'seeded' not in st.session_state:
             st.session_state['seeded'] = True
             st.session_state['work_orders::fixture::draft'] = [
-                dict(station_name='A', kind='電池', equipment='1560268', issued_at='', description='found', selected=True),
+                dict(station_name='A', kind='電池', equipment='1560268', issued_at='', description='found', selected=True, location_confirmed=True),
                 dict(station_name='', kind='電池', equipment='1590102', issued_at='', description='missing', selected=False),
             ]
         render_manager(pd.DataFrame({'場站名稱': ['A']}), cache=cache, token='fixture',

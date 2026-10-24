@@ -1,6 +1,6 @@
 """Regression cases transcribed from the supplied dispatch screenshots."""
 import unittest
-from work_orders import parse_text, apply_lookup_to_draft
+from work_orders import parse_text, apply_lookup_to_draft, prepare_vehicle_draft, DRAFT_SCHEMA
 
 
 class VehiclePriorityTests(unittest.TestCase):
@@ -35,6 +35,28 @@ class VehiclePriorityTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         out = apply_lookup_to_draft(rows, [{'bike_no': '1560268', 'station_name': 'unknown'}], ['新站'], '換電')
         self.assertTrue(all(not r['selected'] for r in out))
+
+    def test_migrate_screenshot_old_draft_and_only_once(self):
+        state = {'p::text': '電池 2.0E 501501011 1590039 車輛電池\n臺東火車站',
+                 'p::draft': [dict(station_name='', equipment='501501011', kind='車輛電池', selected=True)]}
+        prepare_vehicle_draft(state, 'p', ['臺東火車站'])
+        self.assertEqual(len(state['p::draft']), 1)
+        self.assertEqual(state['p::draft'][0]['equipment'], '1590039')
+        self.assertEqual(state['p::draft'][0]['station_name'], '')
+        self.assertFalse(state['p::draft'][0]['selected'])
+        request = state['p::lookup_request']
+        prepare_vehicle_draft(state, 'p', ['臺東火車站'])
+        self.assertEqual(state['p::lookup_request'], request)
+        self.assertEqual(state['p::draft_schema'], DRAFT_SCHEMA)
+
+    def test_header_is_not_a_work_order(self):
+        rows = parse_text('維護項目 車種 場站 車輛號碼 故障資訊 開單來源\n電池 2.0E 501501011 1590039 車輛電池', [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['equipment'], '1590039')
+
+    def test_lookup_cannot_accept_station_number_as_vehicle(self):
+        rows = apply_lookup_to_draft([], [dict(station_name='A', bike_no='501501011')], ['A'], '換電')
+        self.assertEqual(rows, [])
 
 
 if __name__ == '__main__':

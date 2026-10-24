@@ -8,6 +8,15 @@ import unicodedata
 from pathlib import Path
 
 KEY = '__work_orders_v1__'
+DRAFT_SCHEMA = 'vehicle-location-v3'
+
+def is_station_code(value):
+    return bool(re.fullmatch(r'50\d{7}', str(value or '').strip()))
+
+def is_bike_number(value):
+    value = str(value or '').strip()
+    return bool(re.fullmatch(r'[0-9]{6,10}', value)) and not is_station_code(value)
+
 FIELDS = ('station_name', 'kind', 'equipment', 'issued_at', 'description')
 LABELS = dict(zip(FIELDS, ('場站', '派工類型', '設備編號', '派工時間', '問題描述')))
 
@@ -74,6 +83,8 @@ def parse_text(text, station_names):
         line = unicodedata.normalize('NFKC', raw).strip()
         if not line:
             continue
+        if '車輛號碼' in line and ('場站' in line or '故障資訊' in line):
+            continue
         stamp = date_re.search(line)
         if stamp:
             issued = stamp.group().replace('.', '-').replace('/', '-')
@@ -122,7 +133,7 @@ def clear_draft(state, prefix):
     """Reset widget state in a callback, before widgets are instantiated."""
     for key in list(state):
         if key in {prefix + '::text', prefix + '::draft', prefix + '::draft_version',
-                   prefix + '::notice', prefix + '::lookup_request'} or key.startswith(prefix + '::editor::'):
+                   prefix + '::notice', prefix + '::lookup_request', prefix + '::legacy_draft'} or key.startswith(prefix + '::editor::'):
             del state[key]
     state[prefix + '::reset_epoch'] = int(state.get(prefix + '::reset_epoch', 0)) + 1
 
@@ -137,7 +148,7 @@ def lookup_draft(matches, names, kind):
         if not isinstance(row, dict):
             continue
         name, bike = str(row.get('station_name', '')), str(row.get('bike_no', ''))
-        if name not in names or not re.fullmatch(r'[0-9]{6,10}', bike):
+        if name not in names or not is_bike_number(bike):
             continue
         key = (name, bike)
         if key in seen:
@@ -145,7 +156,7 @@ def lookup_draft(matches, names, kind):
         seen.add(key)
         description = f"車號查詢：柱號 {str(row.get('pillar_no') or '未知')[:20]}；查詢時間 {str(row.get('queried_at') or '')[:40]}"
         output.append(dict(station_name=name, equipment=bike, kind=kind, issued_at='',
-                           description=description, selected=True))
+                           description=description, selected=True, location_confirmed=True))
     return output
 
 
@@ -166,6 +177,7 @@ def apply_lookup_to_draft(draft, matches, names, kind):
             for index in indexes:
                 row = base[index]
                 row['station_name'] = found['station_name']
+                row['location_confirmed'] = True
                 if not str(row.get('kind') or '').strip():
                     row['kind'] = found['kind']
                 detail = found['description']
@@ -177,6 +189,29 @@ def apply_lookup_to_draft(draft, matches, names, kind):
             base.append(found)
             by_bike[bike] = [len(base) - 1]
     return base
+
+
+def prepare_vehicle_draft(state, prefix, names):
+    """Migrate transient old OCR results, never mutate saved work orders."""
+    if state.get(prefix + '::draft_schema') == DRAFT_SCHEMA:
+        return
+    state[prefix + '::draft_schema'] = DRAFT_SCHEMA
+    draft = state.get(prefix + '::draft')
+    if not isinstance(draft, list) or not draft:
+        return
+    state[prefix + '::legacy_draft'] = draft
+    if any(is_station_code(row.get('equipment')) for row in draft):
+        original = state.get(prefix + '::text') or '\n'.join(str(row.get('description') or '') for row in draft)
+        draft = parse_text(original, names)
+    else:
+        draft = [dict(row) for row in draft]
+    for row in draft:
+        if is_bike_number(row.get('equipment')) and not row.get('location_confirmed'):
+            row.update(station_name='', selected=False)
+    state[prefix + '::draft'] = draft
+    state[prefix + '::draft_version'] = str(time.time_ns())
+    state[prefix + '::lookup_request'] = state[prefix + '::draft_version']
+    state[prefix + '::notice'] = '已更新舊辨識清單，正在依車號自動查場站；不需要手動選場站。'
 
 
 def lookup_station_args(route_station_map):
@@ -200,9 +235,10 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
     import streamlit.components.v1 as components
     names = sorted(set(status_df['場站名稱'].dropna().astype(str)))
     prefix = f'work_orders::{token}'
+    prepare_vehicle_draft(st.session_state, prefix, names)
     component = components.declare_component('work_order_import', path=str(Path(__file__).with_name('work_order_component')))
     with st.expander(f'🟣 派工待辦｜{len(pending(cache))} 件未完成', expanded=False):
-        st.caption('拍照／多張截圖 → 辨識車號 → 自動查目前場站 → 核對加入。照片場站僅供參考，派工按查回的場站安排。')
+        st.caption('車號自動定位 v3｜照片 → 辨識車號 → 自動填入目前場站。場站由系統查詢，不需要手動選擇。')
         epoch = st.session_state.get(prefix + '::reset_epoch', 0)
         current_draft = st.session_state.get(prefix + '::draft')
         prefill_bike_numbers = []
@@ -211,13 +247,13 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                 str(row.get('equipment') or '').strip()
                 for row in current_draft
                 if isinstance(row, dict)
-                and re.fullmatch(r'[0-9]{6,10}', str(row.get('equipment') or '').strip())
+                and is_bike_number(row.get('equipment'))
             ))
         event = component(token=token, snapshot=orders(cache), reset_epoch=epoch,
                           prefill_bike_numbers=prefill_bike_numbers,
                           lookup_request=st.session_state.get(prefix + '::lookup_request', ''),
                           **lookup_station_args(route_station_map or {}),
-                          key=prefix + '::ocr', default=None)
+                          key=prefix + '::ocr::' + DRAFT_SCHEMA, default=None)
         if isinstance(event, dict) and event.get('event_id') != st.session_state.get(prefix + '::event'):
             st.session_state[prefix + '::event'] = event.get('event_id')
             if event.get('type') == 'restore' and isinstance(event.get('orders'), list):
@@ -250,18 +286,38 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                   help='清除照片、辨識文字、待確認清單及車號搜尋結果；已加入的派工保留。')
         draft = st.session_state.get(prefix + '::draft')
         if draft:
-            st.caption('有車號的派工會重新查目前位置；照片原場站保留在問題描述中。空白代表位置尚未確認，不會按舊場站安排；請重查或人工核對。設備編號和時間也請核對。')
+            vehicle_mode = any(is_bike_number(x.get('equipment')) for x in draft)
+            ready = sum(bool(x.get('location_confirmed')) for x in draft if is_bike_number(x.get('equipment')))
+            if vehicle_mode:
+                st.info(f'已自動定位 {ready} 台；其餘待查。場站由系統填入，無須手動選擇；查不到不會使用照片舊場站。')
+                if st.button('🔄 重新自動查場站', key=prefix + '::retry_location'):
+                    for row in draft:
+                        if is_bike_number(row.get('equipment')):
+                            row.update(station_name='', selected=False, location_confirmed=False)
+                    st.session_state[prefix + '::lookup_request'] = str(time.time_ns())
+                    st.session_state[prefix + '::draft_version'] = st.session_state[prefix + '::lookup_request']
+                    st.rerun()
+                st.caption('車號辨識有誤可在上方修正辨識文字，再按「整理為待確認清單」自動重查。')
             rows = [{'加入': x['selected'], **{LABELS[k]: x[k] for k in FIELDS}} for x in draft]
-            edited = st.data_editor(pd.DataFrame(rows), hide_index=True, num_rows='dynamic',
-                column_config={'場站': st.column_config.SelectboxColumn(options=names, required=True),
+            edited = st.data_editor(pd.DataFrame(rows), hide_index=True, num_rows='fixed' if vehicle_mode else 'dynamic',
+                disabled=['場站', '設備編號'] if vehicle_mode else [],
+                column_config={'場站': (st.column_config.TextColumn('目前場站（自動查詢）') if vehicle_mode
+                                      else st.column_config.SelectboxColumn(options=names, required=True)),
                                '設備編號': st.column_config.TextColumn(), '加入': st.column_config.CheckboxColumn()},
                 key=prefix + '::editor::' + st.session_state.get(prefix + '::draft_version', '0'))
             if st.button('確認加入勾選派工', type='primary', key=prefix + '::add'):
                 selected = edited[edited['加入'].fillna(False)]
                 if selected.empty:
                     st.warning('請至少勾選一筆。')
+                elif any(is_station_code(x) for x in selected['設備編號']):
+                    st.error('辨識內容含場站編號，不能當車號加入。請按「整理為待確認清單」重新解析。')
+                elif any(is_bike_number(row['設備編號']) and not any(
+                    x.get('location_confirmed') and x.get('equipment') == row['設備編號']
+                    and x.get('station_name') == row['場站'] for x in draft
+                ) for row in selected.to_dict('records')):
+                    st.warning('勾選項目尚未查到目前場站，請等待自動查詢或按「重新自動查場站」。不需要手動選站。')
                 elif any(str(x) not in names for x in selected['場站']):
-                    st.error('勾選項目有未配對場站，請先選擇正確場站。')
+                    st.error('尚未確認場站，請重新查詢後再加入。')
                 elif selected['派工類型'].fillna('').str.strip().eq('').any():
                     st.error('請填寫每筆勾選項目的派工類型。')
                 else:
@@ -283,7 +339,10 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                     remaining = edited[~edited['加入'].fillna(False).astype(bool)]
                     if not remaining.empty:
                         st.session_state[prefix + '::draft'] = [
-                            dict(selected=False, **{k: str(row[LABELS[k]]) for k in FIELDS})
+                            dict(selected=False, location_confirmed=any(
+                                x.get('location_confirmed') and x.get('equipment') == row['設備編號']
+                                and x.get('station_name') == row['場站'] for x in draft),
+                                **{k: str(row[LABELS[k]]) for k in FIELDS})
                             for row in remaining.fillna('').to_dict('records')
                         ]
                         st.session_state[prefix + '::draft_version'] = str(time.time_ns())

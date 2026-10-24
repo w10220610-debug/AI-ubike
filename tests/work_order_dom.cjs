@@ -16,9 +16,9 @@ const root=path.join(__dirname,'..','work_order_component');
  const text=q('bike-status').textContent;
  assert.match(text,/成功查詢 1\/2/);assert.match(text,/失敗 1/);assert.match(text,/未配對 1/);assert.match(text,/9999999/);
  assert.match(q('bike-results').textContent,/95%/);assert.match(q('bike-results').textContent,/未提供/);
- q('bike-use').onclick();
- let event=events.find(x=>x.value?.type==='lookup').value;
- assert.equal(event.matches.length,2);assert.equal(event.reset_epoch,0);assert.equal(event.matches[0].bike_no,'0123456');
+ assert.equal(q('bike-use').disabled,true);
+ assert.equal(events.filter(x=>x.value?.type==='lookup').length,0);
+ assert.ok([...q('bike-results').querySelectorAll('input')].every(x=>x.disabled));
  // API business errors must not count as successful empty stations.
  w.fetch=async()=>({ok:true,json:async()=>({retCode:0,retVal:[]})});
  await q('bike-search').onclick();assert.match(q('bike-status').textContent,/成功查詢 0\/2/);

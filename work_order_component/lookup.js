@@ -6,8 +6,8 @@ const WorkOrderLookup = (() => {
   const norm = x => String(x ?? '').normalize('NFKC').trim();
   function parseNumbers(text) {
     const ids = [...new Set(norm(text).split(/[\s,，、;；]+/).filter(Boolean))];
-    if (!ids.length || ids.length > 50 || ids.some(x => !/^[0-9]{6,10}$/.test(x)))
-      throw Error('請輸入 6–10 位完整數字車號，一次最多 50 台；保留開頭的 0。');
+    if (!ids.length || ids.length > 50 || ids.some(x => !/^[0-9]{6,10}$/.test(x) || /^50[0-9]{7}$/.test(x)))
+      throw Error('請輸入 6–10 位完整數字車號，一次最多 50 台；保留開頭的 0；九位場站編號不是車號。');
     return ids;
   }
   function records(data) {
@@ -83,11 +83,11 @@ const WorkOrderLookup = (() => {
     for (const m of matches) counts.set(m.bike_no, (counts.get(m.bike_no) || 0) + 1);
     matches.forEach((m, i) => {
       const label = document.createElement('label'), box = document.createElement('input');
-      box.type = 'checkbox'; box.dataset.match = String(i); box.checked = counts.get(m.bike_no) === 1;
-      label.append(box, document.createTextNode(`${m.bike_no}｜${m.station_name}｜柱號 ${m.pillar_no || '未知'}｜電量 ${m.battery_power == null ? '未提供' : m.battery_power + '%'}｜${m.queried_at}${counts.get(m.bike_no) > 1 ? ' ⚠ 多筆位置，請重新查詢或核對後擇一' : ''}`));
+      box.type = 'checkbox'; box.dataset.match = String(i); box.checked = counts.get(m.bike_no) === 1; box.disabled = true;
+      label.append(box, document.createTextNode(`${m.bike_no}｜${m.station_name}｜柱號 ${m.pillar_no || '未知'}｜電量 ${m.battery_power == null ? '未提供' : m.battery_power + '%'}｜${m.queried_at}${counts.get(m.bike_no) > 1 ? ' ⚠ 多筆位置，請重新查詢' : ''}`));
       root.append(label);
     });
-    $('bike-use').disabled = !matches.length; resize();
+    $('bike-use').disabled = true; resize();
   }
   async function search() {
     let ids;
@@ -149,20 +149,14 @@ const WorkOrderLookup = (() => {
         (failed.length ? ` 失敗 ${failed.length} 站：${failed.join('、')}。` : '') +
         (specs.length > finished ? ` 尚有 ${specs.length - finished} 站未查。` : '') +
         (unmapped.length ? ` 未配對 ${unmapped.length} 站：${unmapped.join('、')}。` : '') +
-        ' 有多位置或查詢不完整時不會自動套用，請核對勾選結果後再帶入。');
+        ' 有多位置或查詢不完整時保留待查；請按「找場站並帶入派工」重新自動查詢，無須手動選站。');
     }
   }
   function init(send, onResize) {
     emit = send; resize = onResize;
     $('bike-search').onclick = search;
     $('bike-cancel').onclick = () => { stop(); renderMatches(); report('已停止，僅顯示已查到的部分結果；請重新查詢以完成搜尋。'); };
-    $('bike-use').onclick = () => {
-      const chosen = [...$('bike-results').querySelectorAll('input:checked')].map(x => matches[Number(x.dataset.match)]);
-      if (!chosen.length) { report('請先勾選查詢結果。'); return; }
-      if (new Set(chosen.map(x => x.bike_no)).size !== chosen.length) { report('同一車號出現多個位置，請核對後只選一筆。'); return; }
-      emit({type: 'lookup', request_id: resultRequest, matches: chosen, kind: $('bike-kind').value});
-      report('已放入下方待確認清單，請核對後按「確認加入勾選派工」。');
-    };
+
   }
   return {init, configure, reset, parseNumbers, records, selectMatches};
 })();
