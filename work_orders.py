@@ -242,7 +242,7 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
     prepare_vehicle_draft(st.session_state, prefix, names)
     component = components.declare_component('work_order_import', path=str(Path(__file__).with_name('work_order_component')))
     with st.expander(f'🟣 派工待辦｜{len(pending(cache))} 件未完成', expanded=False):
-        st.caption('車號自動定位 v3.1｜照片 → 辨識車號 → 自動填入目前場站。場站由系統查詢，不需要手動選擇。')
+        st.caption('截圖辨識車號後，自動查詢目前所在場站；已定位的車可以先加入。')
         epoch = st.session_state.get(prefix + '::reset_epoch', 0)
         current_draft = st.session_state.get(prefix + '::draft')
         prefill_bike_numbers = []
@@ -280,50 +280,121 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                 st.session_state[prefix + '::draft_version'] = str(event.get('event_id'))
                 st.session_state[prefix + '::lookup_request'] = str(event.get('event_id'))
                 st.rerun()
-        text = st.text_area('辨識文字（也可貼上派工文字）', key=prefix + '::text', height=100)
-        if st.button('整理為待確認清單', key=prefix + '::parse'):
-            st.session_state[prefix + '::draft'] = parse_text(text, names)
-            st.session_state[prefix + '::draft_version'] = str(time.time_ns())
-            st.session_state[prefix + '::lookup_request'] = st.session_state[prefix + '::draft_version']
-            st.rerun()
-        st.button('🧹 清除輸入／重新開始', key=prefix + '::clear',
-                  on_click=clear_draft, args=(st.session_state, prefix),
-                  help='清除照片、辨識文字、待確認清單及車號搜尋結果；已加入的派工保留。')
+        # The daily flow is photo -> auto location -> one-tap add.
+        # Move manual editing/clean-up out of the primary mobile view.
+        tool_col_1, tool_col_2 = st.columns(2, gap='small')
+        with tool_col_1:
+            with st.popover('✍️ 貼上派工文字'):
+                text = st.text_area('貼上派工文字', key=prefix + '::text', height=110)
+                if st.button('辨識文字並自動查站', key=prefix + '::parse', use_container_width=True):
+                    st.session_state[prefix + '::draft'] = parse_text(text, names)
+                    st.session_state[prefix + '::draft_version'] = str(time.time_ns())
+                    st.session_state[prefix + '::lookup_request'] = st.session_state[prefix + '::draft_version']
+                    st.rerun()
+        with tool_col_2:
+            with st.popover('⚙️ 其他操作'):
+                st.button(
+                    '🧹 清除本次辨識',
+                    key=prefix + '::clear',
+                    on_click=clear_draft,
+                    args=(st.session_state, prefix),
+                    help='清除照片、辨識文字、待確認清單及找車結果；已加入的派工不會被刪除。',
+                    use_container_width=True,
+                )
+                st.caption('不影響已加入派工；需要時也可在下方管理紀錄。')
+
         draft = st.session_state.get(prefix + '::draft')
         if draft:
             vehicle_mode = any(is_bike_number(x.get('equipment')) for x in draft)
-            ready = sum(bool(x.get('location_confirmed')) for x in draft if is_bike_number(x.get('equipment')))
+            draft_version = st.session_state.get(prefix + '::draft_version', '0')
+            ready = sum(
+                bool(x.get('location_confirmed')) and str(x.get('station_name') or '') in names
+                for x in draft if is_bike_number(x.get('equipment'))
+            )
+            vehicle_count = sum(is_bike_number(x.get('equipment')) for x in draft)
             if vehicle_mode:
-                st.info(f'已自動定位 {ready} 台；其餘待查。場站由系統填入，無須手動選擇；查不到不會使用照片舊場站。')
-                if st.button('🔄 重新自動查場站', key=prefix + '::retry_location'):
-                    for row in draft:
-                        if is_bike_number(row.get('equipment')):
-                            row.update(station_name='', selected=False, location_confirmed=False)
-                    st.session_state[prefix + '::lookup_request'] = str(time.time_ns())
-                    st.session_state[prefix + '::draft_version'] = st.session_state[prefix + '::lookup_request']
-                    st.rerun()
-                st.caption('車號辨識有誤可在上方修正辨識文字，再按「整理為待確認清單」自動重查。')
-            rows = [{'加入': x['selected'], **{LABELS[k]: x[k] for k in FIELDS}} for x in draft]
-            edited = st.data_editor(pd.DataFrame(rows), hide_index=True, num_rows='fixed' if vehicle_mode else 'dynamic',
-                disabled=['場站', '設備編號'] if vehicle_mode else [],
-                column_config={'場站': (st.column_config.TextColumn('目前場站（自動查詢）') if vehicle_mode
-                                      else st.column_config.SelectboxColumn(options=names, required=True)),
-                               '設備編號': st.column_config.TextColumn(), '加入': st.column_config.CheckboxColumn()},
-                key=prefix + '::editor::' + st.session_state.get(prefix + '::draft_version', '0'))
-            if st.button('確認加入勾選派工', type='primary', key=prefix + '::add'):
-                requested = edited['加入'].fillna(False).astype(bool)
-                verified = {(x.get('equipment'), x.get('station_name')) for x in draft if x.get('location_confirmed')}
-                eligible = edited.apply(lambda row: (
-                    str(row['場站']) in names and pd.notna(row['派工類型']) and bool(str(row['派工類型']).strip())
-                    and not is_station_code(row['設備編號'])
-                    and (not is_bike_number(row['設備編號']) or (row['設備編號'], row['場站']) in verified)
-                ), axis=1)
+                st.markdown(f'**🔎 辨識結果｜已定位 {ready}／{vehicle_count} 台**')
+                if ready < vehicle_count:
+                    st.caption('⏳ 未定位的車會保留待查；不會直接使用截圖上的場站，也不必手動選站。')
+                    if st.button('🔄 重新查詢車號位置', key=prefix + '::retry_location'):
+                        for row in draft:
+                            if is_bike_number(row.get('equipment')):
+                                row.update(station_name='', selected=False, location_confirmed=False)
+                        st.session_state[prefix + '::lookup_request'] = str(time.time_ns())
+                        st.session_state[prefix + '::draft_version'] = st.session_state[prefix + '::lookup_request']
+                        st.rerun()
+
+                # Compact row selectors replace the full-width editable table on phones.
+                rows = []
+                for index, item in enumerate(draft):
+                    bike = str(item.get('equipment') or '').strip()
+                    station = str(item.get('station_name') or '').strip()
+                    kind = str(item.get('kind') or '').strip()
+                    located = (bool(item.get('location_confirmed')) and station in names
+                               if is_bike_number(bike) else station in names)
+                    label = (
+                        f"{'✅' if located else '⏳'} {bike or '未指定車號'}｜"
+                        f"{station if located else '目前場站待查'}｜{kind or '派工類型待補'}"
+                    )
+                    checked = st.checkbox(
+                        label,
+                        value=bool(item.get('selected')) and located,
+                        disabled=not located,
+                        key=f'{prefix}::select::{draft_version}::{index}',
+                    )
+                    rows.append({'加入': checked, **{LABELS[k]: item.get(k, '') for k in FIELDS}})
+
+                with st.popover('✏️ 修正派工類型／描述'):
+                    st.caption('只需修正有誤的內容；車號和目前場站由系統查詢，不能在此手動指定。')
+                    edited = st.data_editor(
+                        pd.DataFrame(rows), hide_index=True, num_rows='fixed',
+                        disabled=['加入', '場站', '設備編號'],
+                        column_config={
+                            '場站': st.column_config.TextColumn('目前場站（自動查詢）'),
+                            '設備編號': st.column_config.TextColumn('車號'),
+                            '加入': st.column_config.CheckboxColumn(),
+                        },
+                        key=prefix + '::editor::' + draft_version,
+                        use_container_width=True,
+                    )
+            else:
+                st.info('尚未辨識到車號。可修改辨識文字重新解析；沒有車號的派工仍可依場站人工核對。')
+                rows = [{'加入': x.get('selected', False),
+                         **{LABELS[k]: x.get(k, '') for k in FIELDS}} for x in draft]
+                edited = st.data_editor(
+                    pd.DataFrame(rows), hide_index=True, num_rows='dynamic',
+                    column_config={
+                        '場站': st.column_config.SelectboxColumn(options=names, required=True),
+                        '設備編號': st.column_config.TextColumn(),
+                        '加入': st.column_config.CheckboxColumn(),
+                    },
+                    key=prefix + '::editor::' + draft_version,
+                    use_container_width=True,
+                )
+
+            requested = edited['加入'].fillna(False).astype(bool)
+            verified = {(x.get('equipment'), x.get('station_name'))
+                        for x in draft if x.get('location_confirmed')}
+            eligible = edited.apply(lambda row: (
+                str(row['場站']) in names and pd.notna(row['派工類型'])
+                and bool(str(row['派工類型']).strip())
+                and not is_station_code(row['設備編號'])
+                and (not is_bike_number(row['設備編號'])
+                     or (row['設備編號'], row['場站']) in verified)
+            ), axis=1)
+            addable_count = int((requested & eligible).sum())
+            if st.button(
+                f'✅ 加入 {addable_count} 筆派工',
+                type='primary',
+                key=prefix + '::add',
+                use_container_width=True,
+            ):
                 selected = edited[requested & eligible]
                 if selected.empty:
                     if not eligible.any():
-                        st.warning('車號已辨識，但目前還沒有查到可加入的場站。請看上方查詢進度／錯誤，或按「重新自動查場站」；無須手選場站。')
+                        st.warning('目前沒有可加入的派工。請確認車號已定位、派工類型正確；查不到場站可重新查詢。')
                     else:
-                        st.warning('請勾選已查到場站的派工。')
+                        st.warning('請先勾選已定位的派工。')
                 else:
                     existing = {x['id']: x for x in orders(cache)}
                     added = 0
@@ -339,14 +410,20 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                                 existing[item_id] = item
                             added += 1
                     save()
-                    st.session_state[prefix + '::notice'] = f'已新增 {added} 筆，略過 {len(selected)-added} 筆重複派工；其餘 {len(edited)-len(selected)} 筆保留待查／待確認。'
+                    st.session_state[prefix + '::notice'] = (
+                        f'✅ 已新增 {added} 筆；{len(selected) - added} 筆重複略過；'
+                        f'{len(edited) - len(selected)} 筆保留待查／待確認。'
+                    )
                     remaining = edited.loc[~edited.index.isin(selected.index)]
                     if not remaining.empty:
                         st.session_state[prefix + '::draft'] = [
-                            dict(selected=False, location_confirmed=any(
-                                x.get('location_confirmed') and x.get('equipment') == row['設備編號']
-                                and x.get('station_name') == row['場站'] for x in draft),
-                                **{k: str(row[LABELS[k]]) for k in FIELDS})
+                            dict(
+                                selected=False,
+                                location_confirmed=any(
+                                    x.get('location_confirmed') and x.get('equipment') == row['設備編號']
+                                    and x.get('station_name') == row['場站'] for x in draft),
+                                **{k: str(row[LABELS[k]]) for k in FIELDS},
+                            )
                             for row in remaining.fillna('').to_dict('records')
                         ]
                         st.session_state[prefix + '::draft_version'] = str(time.time_ns())
@@ -355,7 +432,7 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                         st.session_state.pop(prefix + '::lookup_request', None)
                     st.rerun()
         elif draft == []:
-            st.info('尚未找到可解析的派工列。請保留每列的場站、派工類型、設備編號，或修正辨識文字。')
+            st.info('沒有辨識出可用的派工列。可換清晰截圖，或用「貼上派工文字」修正再試。')
         notice = st.session_state.pop(prefix + '::notice', None)
         if notice:
             st.success(notice)
