@@ -436,44 +436,51 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
         notice = st.session_state.pop(prefix + '::notice', None)
         if notice:
             st.success(notice)
-        show_done = st.checkbox('顯示已完成派工／復原', key=prefix + '::show_done')
-        for item in list(orders(cache)):
-            if item['state'] == 'deleted':
-                continue
-            if item['state'] == 'done' and not show_done:
-                continue
-            with st.container(border=True):
-                marker = {'done': '✅', 'blocked': '⏸', 'pending': '🟣'}[item['state']]
-                st.write(f"{marker} **{item['station_name']}**｜{item['kind']}｜{item['equipment'] or '未指定設備'}")
-                st.caption(f"{item['issued_at']}｜{item['description']}")
-                if item['station_name'] not in names:
-                    st.warning('此站不在目前配置範圍，待辦仍保留；請切換配置後安排路線。')
-                left, right = st.columns(2)
-                if left.button('復原' if item['state'] == 'done' else '✓ 完成', key=prefix + item['id'] + 'done'):
-                    item.update(state='pending' if item['state'] == 'done' else 'done', updated_at=time.time())
+        # Saved tasks and backup tools stay accessible without overwhelming photo import.
+        if st.toggle(
+            f'📋 查看／管理已加入派工（{len(pending(cache))} 件未完成）',
+            value=False,
+            key=prefix + '::show_tasks',
+        ):
+            show_done = st.checkbox('顯示已完成派工／復原', key=prefix + '::show_done')
+            for item in list(orders(cache)):
+                if item['state'] == 'deleted':
+                    continue
+                if item['state'] == 'done' and not show_done:
+                    continue
+                with st.container(border=True):
+                    marker = {'done': '✅', 'blocked': '⏸', 'pending': '🟣'}[item['state']]
+                    st.write(f"{marker} **{item['station_name']}**｜{item['kind']}｜{item['equipment'] or '未指定設備'}")
+                    st.caption(f"{item['issued_at']}｜{item['description']}")
+                    if item['station_name'] not in names:
+                        st.warning('此站不在目前配置範圍，待辦仍保留；請切換配置後安排路線。')
+                    left, right = st.columns(2)
+                    if left.button('復原' if item['state'] == 'done' else '✓ 完成', key=prefix + item['id'] + 'done'):
+                        item.update(state='pending' if item['state'] == 'done' else 'done', updated_at=time.time())
+                        save()
+                        st.rerun()
+                    if item['state'] != 'done' and right.button('恢復待辦' if item['state'] == 'blocked' else '暫時無法處理', key=prefix + item['id'] + 'block'):
+                        item.update(state='pending' if item['state'] == 'blocked' else 'blocked', updated_at=time.time())
+                        save()
+                        st.rerun()
+                    if st.button('移除誤加派工', key=prefix + item['id'] + 'delete'):
+                        item.update(state='deleted', updated_at=time.time())
+                        save()
+                        st.rerun()
+        with st.popover('💾 匯出／還原派工紀錄'):
+            st.download_button('匯出派工紀錄', json.dumps(orders(cache), ensure_ascii=False, indent=2),
+                               'work-orders.json', 'application/json', key=prefix + 'export')
+            backup = st.file_uploader('還原派工紀錄 JSON', type=['json'], key=prefix + 'backup')
+            if backup and st.button('合併還原紀錄', key=prefix + 'restore'):
+                try:
+                    data = json.loads(backup.getvalue())
+                    if not isinstance(data, list):
+                        raise ValueError('須為派工紀錄清單')
+                    merge(cache, data)
                     save()
                     st.rerun()
-                if item['state'] != 'done' and right.button('恢復待辦' if item['state'] == 'blocked' else '暫時無法處理', key=prefix + item['id'] + 'block'):
-                    item.update(state='pending' if item['state'] == 'blocked' else 'blocked', updated_at=time.time())
-                    save()
-                    st.rerun()
-                if st.button('移除誤加派工', key=prefix + item['id'] + 'delete'):
-                    item.update(state='deleted', updated_at=time.time())
-                    save()
-                    st.rerun()
-        st.download_button('匯出派工紀錄', json.dumps(orders(cache), ensure_ascii=False, indent=2),
-                           'work-orders.json', 'application/json', key=prefix + 'export')
-        backup = st.file_uploader('還原派工紀錄 JSON', type=['json'], key=prefix + 'backup')
-        if backup and st.button('合併還原紀錄', key=prefix + 'restore'):
-            try:
-                data = json.loads(backup.getvalue())
-                if not isinstance(data, list):
-                    raise ValueError('須為派工紀錄清單')
-                merge(cache, data)
-                save()
-                st.rerun()
-            except (ValueError, TypeError, KeyError):
-                st.error('無法讀取此派工紀錄檔。')
+                except (ValueError, TypeError, KeyError):
+                    st.error('無法讀取此派工紀錄檔。')
     if pending(cache):
         st.caption(f'🟣 尚有 {len(pending(cache))} 件派工／{len(pending_names(cache))} 站，請在派工待辦逐筆完成。')
     if page_mode == '一般分析':
