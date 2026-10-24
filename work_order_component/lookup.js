@@ -1,7 +1,8 @@
-/* Vehicle lookup is user-triggered, bounded and independent of page rendering. */
+/* Bounded lookup: explicit search or one automatic search per parsed draft. */
 const WorkOrderLookup = (() => {
   const $ = id => document.getElementById(id);
   let args = {}, emit, resize, generation = 0, controllers = new Set(), matches = [];
+  let autoRequest = '', resultRequest = '';
   const norm = x => String(x ?? '').normalize('NFKC').trim();
   function parseNumbers(text) {
     const ids = [...new Set(norm(text).split(/[\s,，、;；]+/).filter(Boolean))];
@@ -46,11 +47,14 @@ const WorkOrderLookup = (() => {
     $('bike-cancel').disabled = true;
   }
   function reset() {
-    stop(); matches = [];
+    stop(); matches = []; autoRequest = ''; resultRequest = '';
     $('bike-numbers').value = ''; $('bike-results').replaceChildren();
     $('bike-use').disabled = true; $('bike-status').textContent = '';
   }
   function configure(next) {
+    if ((args.lookup_request || '') !== (next.lookup_request || '')) {
+      stop(); matches = []; renderMatches();
+    }
     const scope = x => JSON.stringify((x.stations || []).map(s => [s.name, s.station_no]));
     if (scope(args) !== scope(next) && (matches.length || !$('bike-cancel').disabled)) {
       stop(); matches = []; renderMatches();
@@ -61,10 +65,14 @@ const WorkOrderLookup = (() => {
       (args.catalog_pending ? '；站號清單準備中，稍後即可查詢。' : '') +
       (args.catalog_error ? '；場站清單更新失敗。' : '');
     const prefill = [...new Set((args.prefill_bike_numbers || []).map(norm).filter(x => /^[0-9]{6,10}$/.test(x)))];
-    if (prefill.length && !$('bike-numbers').value.trim() && $('bike-cancel').disabled) {
+    const request = args.lookup_request || '';
+    if (prefill.length && request && request !== autoRequest && !args.catalog_pending) {
+      autoRequest = request;
       $('bike-numbers').value = prefill.join('\n');
       $('lookup-panel').open = true;
-      report(`已從派工內容抓到 ${prefill.length} 個車號；按「找場站並帶入派工」即可自動回填。`);
+      search();
+    } else if (prefill.length && !request && !$('bike-numbers').value.trim()) {
+      $('bike-numbers').value = prefill.join('\n');
     }
     if ($('bike-cancel').disabled) $('bike-search').disabled = !!args.catalog_pending;
     resize();
@@ -86,6 +94,8 @@ const WorkOrderLookup = (() => {
     try { ids = parseNumbers($('bike-numbers').value); } catch (e) { report(e.message); return; }
     if (args.catalog_pending) { report('場站清單尚未準備完成，請稍後重試。'); return; }
     stop(); const run = generation;
+    resultRequest = args.lookup_request || '';
+    const requestId = resultRequest;
     matches = []; renderMatches(); $('bike-search').disabled = true; $('bike-cancel').disabled = false;
     const wanted = new Set(ids), unique = new Map(), unmapped = [];
     for (const spec of args.stations || []) {
@@ -127,11 +137,12 @@ const WorkOrderLookup = (() => {
     const counts = new Map();
     for (const m of matches) counts.set(m.bike_no, (counts.get(m.bike_no) || 0) + 1);
     const uniqueMatches = matches.filter(m => counts.get(m.bike_no) === 1);
-    const autoApply = !timedOut && !failed.length && !unmapped.length && !missing.length &&
-      uniqueMatches.length === ids.length;
+    const autoApply = !timedOut && !failed.length && !unmapped.length &&
+      uniqueMatches.length > 0 && uniqueMatches.length === matches.length;
     if (autoApply) {
-      emit({type: 'lookup', matches: uniqueMatches, kind: $('bike-kind').value});
-      report(`已找到 ${ids.length} 台，唯一場站已自動帶入派工待確認清單。`);
+      emit({type: 'lookup', request_id: requestId, matches: uniqueMatches, kind: $('bike-kind').value});
+      report(`已找到 ${uniqueMatches.length} 台，已依目前場站帶入派工待確認清單。` +
+        (missing.length ? ` 本次未找到：${missing.join('、')}；保留待確認，不使用照片舊場站。` : ''));
     } else {
       report(`${timedOut ? '搜尋達 60 秒上限，結果不完整。' : '本次搜尋結束。'}成功查詢 ${succeeded}/${specs.length} 站，找到 ${found.size} 台。` +
         (missing.length ? ` 本次未找到：${missing.join('、')}；不代表車輛不在或已借出。` : '') +
@@ -149,7 +160,7 @@ const WorkOrderLookup = (() => {
       const chosen = [...$('bike-results').querySelectorAll('input:checked')].map(x => matches[Number(x.dataset.match)]);
       if (!chosen.length) { report('請先勾選查詢結果。'); return; }
       if (new Set(chosen.map(x => x.bike_no)).size !== chosen.length) { report('同一車號出現多個位置，請核對後只選一筆。'); return; }
-      emit({type: 'lookup', matches: chosen, kind: $('bike-kind').value});
+      emit({type: 'lookup', request_id: resultRequest, matches: chosen, kind: $('bike-kind').value});
       report('已放入下方待確認清單，請核對後按「確認加入勾選派工」。');
     };
   }

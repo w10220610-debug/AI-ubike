@@ -18,7 +18,9 @@ def test_photo_rows_unknown_and_duplicate():
     assert rows[0]['equipment'] == '1590155'
     assert rows[0]['issued_at'] == '2026-10-03 21:05:56'
     assert rows[2]['station_name'] == '' and not rows[2]['selected']
-    assert identity(rows[0]) == identity(dict(rows[0], station_name='台東航空站'))
+    assert rows[0]['source_station'] == '臺東航空站'
+    assert rows[0]['station_name'] == '' and not rows[0]['selected']
+    assert identity(dict(rows[0], station_name='臺東航空站')) == identity(dict(rows[0], station_name='台東航空站'))
 
 
 def test_completion_and_restore_do_not_resurrect_stale_backup():

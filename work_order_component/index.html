@@ -42,7 +42,7 @@ start.onclick=async()=>{const selected=[...files.files,...camera.files];if(!sele
  worker=createdWorker;
  await worker.setParameters({tessedit_pageseg_mode:'6',preserve_interword_spaces:'1'});
  const texts=[];for(let i=0;i<selected.length;i++){report(`處理第 ${i+1}/${selected.length} 張…`);const canvas=await canvasFor(selected[i]);if(run!==generation)return;const result=await worker.recognize(canvas);texts.push(result.data.text);canvas.width=canvas.height=1;if(run!==generation)return}
- value({type:'ocr',text:texts.join('\n')});report('辨識完成，請在下方核對場站、設備編號與派工時間，再確認加入。');
+ value({type:'ocr',text:texts.join('\n')});report('辨識完成，正在依車號查目前場站；請在下方核對結果後確認加入。');
  }catch(e){if(run===generation)report('辨識未完成：'+e.message+' 可改貼派工文字。')}
  finally{clearTimeout(timeout);if(run===generation){if(worker)await worker.terminate();worker=null;start.disabled=false;cancel.disabled=true;resize()}}};
 send('streamlit:componentReady',{apiVersion:1});resize();

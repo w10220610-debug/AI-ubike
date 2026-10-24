@@ -61,3 +61,27 @@ def test_real_streamlit_reset_after_failed_parse_and_remove():
         next(x for x in app.button if x.label == '移除誤加派工').click().run()
         assert not app.exception
         assert not pending(app.session_state['cache'])
+
+
+def test_import_found_vehicle_keeps_missing_vehicle_for_retry():
+    def fixture():
+        import streamlit as st
+        import pandas as pd
+        from work_orders import render_manager
+        cache = st.session_state.setdefault('cache', {})
+        if 'seeded' not in st.session_state:
+            st.session_state['seeded'] = True
+            st.session_state['work_orders::fixture::draft'] = [
+                dict(station_name='A', kind='電池', equipment='1560268', issued_at='', description='found', selected=True),
+                dict(station_name='', kind='電池', equipment='1590102', issued_at='', description='missing', selected=False),
+            ]
+        render_manager(pd.DataFrame({'場站名稱': ['A']}), cache=cache, token='fixture',
+                       page_mode='一般分析', save=lambda: None)
+    with patch('work_orders.lookup_station_args', return_value=dict(stations=[], catalog_pending=False, catalog_error='')):
+        app = AppTest.from_function(fixture).run()
+        next(x for x in app.button if x.label == '確認加入勾選派工').click().run()
+        assert not app.exception
+        assert [r['equipment'] for r in pending(app.session_state['cache'])] == ['1560268']
+        draft = app.session_state['work_orders::fixture::draft']
+        assert len(draft) == 1 and draft[0]['equipment'] == '1590102'
+        assert draft[0]['station_name'] == '' and not draft[0]['selected']

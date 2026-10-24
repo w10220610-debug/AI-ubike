@@ -34,6 +34,26 @@ const root=path.join(__dirname,'..','work_order_component');
  const ocr=q('start').onclick();await wait(()=>!!finishWorker);render(2);finishWorker();await ocr;
  assert.equal(terminated,true);assert.equal(events.filter(x=>x.value?.type==='ocr').length,0);
  assert.equal(q('start').disabled,false);assert.equal(q('camera').value,'');
+ // A parsed photo must auto-search even when a previous input is present.
+ let calls=0;
+ w.fetch=async()=>{calls++;return {ok:true,json:async()=>[{bike_no:'1560268',pillar_no:'12'}]}};
+ const autoArgs={token:'fixture',snapshot:[],reset_epoch:2,stations:[{name:'NEW',station_no:'1'}],catalog_pending:true,lookup_request:'photo-1',prefill_bike_numbers:['1560268','1590102']};
+ const autoRender=()=>w.dispatchEvent(new w.MessageEvent('message',{source:w,data:{type:'streamlit:render',args:JSON.parse(JSON.stringify(autoArgs))}}));
+ q('bike-numbers').value='9999999';autoRender();assert.equal(calls,0);
+ autoArgs.catalog_pending=false;autoRender();
+ await wait(()=>events.some(x=>x.value?.request_id==='photo-1'));
+ const autoEvent=events.find(x=>x.value?.request_id==='photo-1').value;
+ assert.equal(autoEvent.matches.length,1);assert.equal(autoEvent.matches[0].station_name,'NEW');
+ assert.match(q('bike-status').textContent,/1590102/);
+ assert.equal(q('bike-numbers').value,'1560268\n1590102');
+ autoRender();await new Promise(r=>setTimeout(r,10));assert.equal(calls,1);
+ // New draft invalidates an older in-flight response.
+ let finishOld;const oldGate=new Promise(r=>finishOld=r);
+ w.fetch=async()=>{await oldGate;return {ok:true,json:async()=>[{bike_no:'1560268'}]}};
+ autoArgs.lookup_request='old-photo';autoRender();
+ autoArgs.lookup_request='new-photo';autoArgs.catalog_pending=true;autoRender();
+ finishOld();await new Promise(r=>setTimeout(r,10));
+ assert.equal(events.filter(x=>x.value?.request_id==='old-photo').length,0);
  console.log('DOM checks passed: batch/leading-zero lookup, missing power, partial failure, API errors, handoff, reset race, OCR cancellation.');
  dom.window.close();
 })().catch(e=>{console.error(e);process.exitCode=1});
