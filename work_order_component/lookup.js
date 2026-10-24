@@ -69,7 +69,7 @@ const WorkOrderLookup = (() => {
     if (prefill.length && request && request !== autoRequest && !args.catalog_pending) {
       autoRequest = request;
       $('bike-numbers').value = prefill.join('\n');
-      $('lookup-panel').open = true;
+      // Keep manual lookup collapsed during automatic photo lookup.
       search();
     } else if (prefill.length && !request && !$('bike-numbers').value.trim()) {
       $('bike-numbers').value = prefill.join('\n');
@@ -141,13 +141,13 @@ const WorkOrderLookup = (() => {
     // Conflicting positions remain unresolved; never choose one arbitrarily.
     emit({type: 'lookup', request_id: requestId, searched_ids: ids,
       matches: uniqueMatches, kind: $('bike-kind').value});
-    report(`成功查詢 ${succeeded}/${specs.length} 站，已自動帶入 ${uniqueMatches.length} 台，可先確認加入。` +
-      (missing.length ? ` 本次未找到：${missing.join('、')}；保留待查。` : '') +
-      ([...counts.values()].some(n => n > 1) ? ' 多位置車輛保留待查，不自動選站。' : '') +
-      (timedOut ? ' 本輪逾時，其他車輛可重查。' : '') +
-      (failed.length ? ` 失敗 ${failed.length} 站：${failed.join('、')}。` : '') +
-      (unmapped.length ? ` 未配對 ${unmapped.length} 站：${unmapped.join('、')}。` : '') +
-      ' 已找到的車不受其他站查詢失敗影響。');
+    report(`✅ 已定位 ${uniqueMatches.length} 台（已查 ${succeeded}/${specs.length} 站）` +
+      (missing.length ? `｜待查 ${missing.length} 台：${missing.slice(0, 5).join('、')}${missing.length > 5 ? '…' : ''}` : '') +
+      ([...counts.values()].some(n => n > 1) ? '｜偵測到多個位置，相關車號暫不加入' : '') +
+      (timedOut ? '｜查詢逾時，可重新查詢' : '') +
+      (failed.length ? `｜${failed.length} 站查詢失敗` : '') +
+      (unmapped.length ? `｜${unmapped.length} 站尚未配對` : '') +
+      '。已定位車輛可先加入派工。');
   }
   function init(send, onResize) {
     emit = send; resize = onResize;
