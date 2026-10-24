@@ -58,6 +58,16 @@ class VehiclePriorityTests(unittest.TestCase):
         rows = apply_lookup_to_draft([], [dict(station_name='A', bike_no='501501011')], ['A'], '換電')
         self.assertEqual(rows, [])
 
+    def test_requery_clears_stale_location_and_keeps_successful_match(self):
+        draft = [dict(equipment='1560268', station_name='OLD', selected=True, location_confirmed=True),
+                 dict(equipment='1590102', station_name='OLD', selected=True, location_confirmed=True)]
+        out = apply_lookup_to_draft(draft, [dict(bike_no='1560268', station_name='NEW')], ['NEW'], '換電', ['1560268', '1590102'])
+        self.assertEqual(out[0]['station_name'], 'NEW')
+        self.assertTrue(out[0]['location_confirmed'])
+        self.assertEqual(out[1]['station_name'], '')
+        self.assertFalse(out[1]['location_confirmed'])
+        self.assertFalse(out[1]['selected'])
+
 
 if __name__ == '__main__':
     unittest.main()

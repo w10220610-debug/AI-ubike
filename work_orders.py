@@ -160,9 +160,13 @@ def lookup_draft(matches, names, kind):
     return output
 
 
-def apply_lookup_to_draft(draft, matches, names, kind):
+def apply_lookup_to_draft(draft, matches, names, kind, searched_ids=None):
     """Fill current parsed rows by exact bike number; append vehicle-only rows."""
     base = [dict(row) for row in draft] if isinstance(draft, list) else []
+    searched = {str(x) for x in (searched_ids or []) if is_bike_number(x)}
+    for row in base:
+        if str(row.get('equipment') or '') in searched:
+            row.update(station_name='', selected=False, location_confirmed=False)
     found_rows = lookup_draft(matches, names, kind)
     by_bike = {}
     for index, row in enumerate(base):
@@ -238,7 +242,7 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
     prepare_vehicle_draft(st.session_state, prefix, names)
     component = components.declare_component('work_order_import', path=str(Path(__file__).with_name('work_order_component')))
     with st.expander(f'🟣 派工待辦｜{len(pending(cache))} 件未完成', expanded=False):
-        st.caption('車號自動定位 v3｜照片 → 辨識車號 → 自動填入目前場站。場站由系統查詢，不需要手動選擇。')
+        st.caption('車號自動定位 v3.1｜照片 → 辨識車號 → 自動填入目前場站。場站由系統查詢，不需要手動選擇。')
         epoch = st.session_state.get(prefix + '::reset_epoch', 0)
         current_draft = st.session_state.get(prefix + '::draft')
         prefill_bike_numbers = []
@@ -253,7 +257,7 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                           prefill_bike_numbers=prefill_bike_numbers,
                           lookup_request=st.session_state.get(prefix + '::lookup_request', ''),
                           **lookup_station_args(route_station_map or {}),
-                          key=prefix + '::ocr::' + DRAFT_SCHEMA, default=None)
+                          key=prefix + '::ocr::' + DRAFT_SCHEMA + '::partial-v1', default=None)
         if isinstance(event, dict) and event.get('event_id') != st.session_state.get(prefix + '::event'):
             st.session_state[prefix + '::event'] = event.get('event_id')
             if event.get('type') == 'restore' and isinstance(event.get('orders'), list):
@@ -267,6 +271,7 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                     event.get('matches'),
                     names,
                     event.get('kind'),
+                    event.get('searched_ids'),
                 )
                 st.session_state[prefix + '::draft_version'] = str(event.get('event_id'))
             elif event.get('type') == 'ocr' and event.get('reset_epoch') == epoch:
@@ -306,20 +311,19 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                                '設備編號': st.column_config.TextColumn(), '加入': st.column_config.CheckboxColumn()},
                 key=prefix + '::editor::' + st.session_state.get(prefix + '::draft_version', '0'))
             if st.button('確認加入勾選派工', type='primary', key=prefix + '::add'):
-                selected = edited[edited['加入'].fillna(False)]
+                requested = edited['加入'].fillna(False).astype(bool)
+                verified = {(x.get('equipment'), x.get('station_name')) for x in draft if x.get('location_confirmed')}
+                eligible = edited.apply(lambda row: (
+                    str(row['場站']) in names and pd.notna(row['派工類型']) and bool(str(row['派工類型']).strip())
+                    and not is_station_code(row['設備編號'])
+                    and (not is_bike_number(row['設備編號']) or (row['設備編號'], row['場站']) in verified)
+                ), axis=1)
+                selected = edited[requested & eligible]
                 if selected.empty:
-                    st.warning('請至少勾選一筆。')
-                elif any(is_station_code(x) for x in selected['設備編號']):
-                    st.error('辨識內容含場站編號，不能當車號加入。請按「整理為待確認清單」重新解析。')
-                elif any(is_bike_number(row['設備編號']) and not any(
-                    x.get('location_confirmed') and x.get('equipment') == row['設備編號']
-                    and x.get('station_name') == row['場站'] for x in draft
-                ) for row in selected.to_dict('records')):
-                    st.warning('勾選項目尚未查到目前場站，請等待自動查詢或按「重新自動查場站」。不需要手動選站。')
-                elif any(str(x) not in names for x in selected['場站']):
-                    st.error('尚未確認場站，請重新查詢後再加入。')
-                elif selected['派工類型'].fillna('').str.strip().eq('').any():
-                    st.error('請填寫每筆勾選項目的派工類型。')
+                    if not eligible.any():
+                        st.warning('車號已辨識，但目前還沒有查到可加入的場站。請看上方查詢進度／錯誤，或按「重新自動查場站」；無須手選場站。')
+                    else:
+                        st.warning('請勾選已查到場站的派工。')
                 else:
                     existing = {x['id']: x for x in orders(cache)}
                     added = 0
@@ -335,8 +339,8 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                                 existing[item_id] = item
                             added += 1
                     save()
-                    st.session_state[prefix + '::notice'] = f'已新增 {added} 筆，略過 {len(selected)-added} 筆重複派工。'
-                    remaining = edited[~edited['加入'].fillna(False).astype(bool)]
+                    st.session_state[prefix + '::notice'] = f'已新增 {added} 筆，略過 {len(selected)-added} 筆重複派工；其餘 {len(edited)-len(selected)} 筆保留待查／待確認。'
+                    remaining = edited.loc[~edited.index.isin(selected.index)]
                     if not remaining.empty:
                         st.session_state[prefix + '::draft'] = [
                             dict(selected=False, location_confirmed=any(

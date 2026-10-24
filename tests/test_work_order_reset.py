@@ -67,13 +67,14 @@ def test_import_found_vehicle_keeps_missing_vehicle_for_retry():
     def fixture():
         import streamlit as st
         import pandas as pd
-        from work_orders import render_manager
+        from work_orders import render_manager, DRAFT_SCHEMA
+        st.session_state['work_orders::fixture::draft_schema'] = DRAFT_SCHEMA
         cache = st.session_state.setdefault('cache', {})
         if 'seeded' not in st.session_state:
             st.session_state['seeded'] = True
             st.session_state['work_orders::fixture::draft'] = [
                 dict(station_name='A', kind='電池', equipment='1560268', issued_at='', description='found', selected=True, location_confirmed=True),
-                dict(station_name='', kind='電池', equipment='1590102', issued_at='', description='missing', selected=False),
+                dict(station_name='', kind='電池', equipment='1590102', issued_at='', description='missing', selected=True),
             ]
         render_manager(pd.DataFrame({'場站名稱': ['A']}), cache=cache, token='fixture',
                        page_mode='一般分析', save=lambda: None)

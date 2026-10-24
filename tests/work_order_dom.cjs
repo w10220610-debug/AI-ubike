@@ -17,7 +17,8 @@ const root=path.join(__dirname,'..','work_order_component');
  assert.match(text,/成功查詢 1\/2/);assert.match(text,/失敗 1/);assert.match(text,/未配對 1/);assert.match(text,/9999999/);
  assert.match(q('bike-results').textContent,/95%/);assert.match(q('bike-results').textContent,/未提供/);
  assert.equal(q('bike-use').disabled,true);
- assert.equal(events.filter(x=>x.value?.type==='lookup').length,0);
+ assert.equal(events.filter(x=>x.value?.type==='lookup').length,1);
+ assert.equal(events.find(x=>x.value?.type==='lookup').value.matches.length,2);
  assert.ok([...q('bike-results').querySelectorAll('input')].every(x=>x.disabled));
  // API business errors must not count as successful empty stations.
  w.fetch=async()=>({ok:true,json:async()=>({retCode:0,retVal:[]})});
