@@ -133,7 +133,7 @@ def clear_draft(state, prefix):
     """Reset widget state in a callback, before widgets are instantiated."""
     for key in list(state):
         if key in {prefix + '::text', prefix + '::draft', prefix + '::draft_version',
-                   prefix + '::notice', prefix + '::lookup_request', prefix + '::legacy_draft'} or key.startswith(prefix + '::editor::'):
+                   prefix + '::notice', prefix + '::lookup_request', prefix + '::legacy_draft'} or key.startswith((prefix + '::editor::', prefix + '::select::')):
             del state[key]
     state[prefix + '::reset_epoch'] = int(state.get(prefix + '::reset_epoch', 0)) + 1
 
