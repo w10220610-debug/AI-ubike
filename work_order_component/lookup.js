@@ -71,6 +71,9 @@ const WorkOrderLookup = (() => {
       $('bike-numbers').value = prefill.join('\n');
       // Keep manual lookup collapsed during automatic photo lookup.
       search();
+    } else if (prefill.length && request && args.catalog_pending) {
+      report('⏳ 正在取得場站資料；準備完成後會自動查詢車號。' +
+        (args.catalog_error ? ' 場站清單更新失敗，正在等待備援資料。' : ''));
     } else if (prefill.length && !request && !$('bike-numbers').value.trim()) {
       $('bike-numbers').value = prefill.join('\n');
     }
