@@ -65,13 +65,17 @@ POST_V30_CHANGES: tuple[tuple[str, str], ...] = (
         "2026-10-06",
         "派工新增完整車號批次找車：目前配置範圍內搜尋場站、柱號與電量，核對後加入共用派工待辦。",
     ),
+    (
+        "2026-10-25",
+        "配置類型預設不選取任何配置頁，需由使用者手動選擇後才載入調度分析；取消全部選擇也不再自動帶回上一筆或第一筆。",
+    ),
 )
 
 _COMPLETED_GENERATIONS_AFTER_V30 = len(POST_V30_CHANGES) // VERSION_CHANGE_THRESHOLD
 VERSION_PENDING_CHANGE_COUNT = len(POST_V30_CHANGES) % VERSION_CHANGE_THRESHOLD
 SYSTEM_GENERATION = VERSION_BASE_GENERATION + _COMPLETED_GENERATIONS_AFTER_V30
 SYSTEM_VERSION = f"V{SYSTEM_GENERATION}"
-SYSTEM_BUILD_DATE = "2026-10-06"
+SYSTEM_BUILD_DATE = "2026-10-25"
 SYSTEM_VERSION_LABEL = f"{SYSTEM_VERSION}｜第{SYSTEM_GENERATION}代"
 NEXT_SYSTEM_VERSION = f"V{SYSTEM_GENERATION + 1}"
 
@@ -518,15 +522,16 @@ def _configuration_multiselect(label, options, *args, **kwargs):
         return _ORIGINAL_SELECTBOX(label, option_list, *args, **kwargs)
 
     legacy_key = str(kwargs.get("key") or "configuration_type")
-    multi_key = f"{legacy_key}::multi"
+    # Use a fresh widget key to discard selections previously inserted by the
+    # legacy auto-first-item behavior, without resetting intentional later picks.
+    multi_key = f"{legacy_key}::multi_manual_v1"
     valid_text = [str(item) for item in option_list]
 
     existing_multi = st.session_state.get(multi_key)
     if isinstance(existing_multi, (list, tuple)):
         default_selected = [str(item) for item in existing_multi if str(item) in valid_text]
     else:
-        existing_single = str(st.session_state.get(legacy_key) or "")
-        default_selected = [existing_single] if existing_single in valid_text else [valid_text[0]]
+        default_selected = []
 
     help_text = kwargs.get("help")
     selected = _ORIGINAL_MULTISELECT(
@@ -541,13 +546,15 @@ def _configuration_multiselect(label, options, *args, **kwargs):
         placeholder="選擇要載入的配置",
     )
 
-    if not selected:
-        selected = [default_selected[0] if default_selected else valid_text[0]]
-        st.caption("⚠ 配置類型至少需要保留一項；目前暫時沿用上一項選擇。")
-
+    # Never silently select a configuration. Downstream dispatch code requires
+    # a real selected sheet, so hold analysis until the user chooses one.
     selected = [str(item) for item in selected if str(item) in valid_text]
     if not selected:
-        selected = [valid_text[0]]
+        st.session_state[legacy_key] = None
+        scope_key = f"__v31_selected_configuration_sheets__::{legacy_key}"
+        st.session_state[scope_key] = ()
+        st.info("請先自行選擇配置類型，選擇後才會載入對應的場站與調度分析。")
+        st.stop()
 
     namespace = _legacy_exec_globals()
     selected_zones: list[str] = []
