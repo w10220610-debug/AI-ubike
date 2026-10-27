@@ -191,7 +191,7 @@ def parse_text(text, station_names):
         if kind:
             fallback.append(dict(station_name=name, kind=kind, equipment='',
                                  issued_at='', description=line, source_station=name,
-                                 selected=True))
+                                 selected=False))
     return fallback
 
 def badge_html(cache, station):
@@ -475,7 +475,7 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                 selected = edited[requested & eligible]
                 if selected.empty:
                     if not eligible.any():
-                        st.warning('目前沒有可加入的派工。請確認車號已定位、派工類型正確；查不到場站可重新查詢。')
+                        st.warning('目前沒有可加入的派工。請確認車號已定位、派工類型及完整敘述皆正確；查不到場站可重新查詢。')
                     else:
                         st.warning('請先勾選已定位的派工。')
                 else:
