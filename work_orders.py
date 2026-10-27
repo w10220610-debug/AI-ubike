@@ -17,8 +17,8 @@ def is_bike_number(value):
     value = str(value or '').strip()
     return bool(re.fullmatch(r'[0-9]{6,10}', value)) and not is_station_code(value)
 
-FIELDS = ('station_name', 'kind', 'equipment', 'issued_at', 'description', 'source_station')
-LABELS = dict(zip(FIELDS, ('場站', '派工類型', '設備編號', '派工時間', '問題描述', '照片場站（參考）')))
+FIELDS = ('station_name', 'kind', 'equipment', 'issued_at', 'description', 'source_station', 'lookup_detail')
+LABELS = dict(zip(FIELDS, ('場站', '派工類型', '設備編號', '派工時間', '問題描述', '照片場站（參考）', '定位資訊')))
 
 
 def station_key(value):
@@ -230,7 +230,8 @@ def lookup_draft(matches, names, kind):
         seen.add(key)
         description = f"車號查詢：柱號 {str(row.get('pillar_no') or '未知')[:20]}；查詢時間 {str(row.get('queried_at') or '')[:40]}"
         output.append(dict(station_name=name, equipment=bike, kind=kind, issued_at='',
-                           description=description, selected=True, location_confirmed=True))
+                           description=description, lookup_detail=description,
+                           selected=True, location_confirmed=True))
     return output
 
 
@@ -258,10 +259,8 @@ def apply_lookup_to_draft(draft, matches, names, kind, searched_ids=None):
                 row['location_confirmed'] = True
                 if not str(row.get('kind') or '').strip():
                     row['kind'] = found['kind']
-                detail = found['description']
-                current = str(row.get('description') or '').strip()
-                if detail and detail not in current:
-                    row['description'] = (current + '；' + detail).strip('；')
+                # Query metadata is separate: never alter the OCR problem narrative.
+                row['lookup_detail'] = found['description']
                 row['selected'] = True
         else:
             base.append(found)
@@ -421,6 +420,8 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                         st.write(item.get('description') or '⚠️ 未辨識到問題敘述，請在下方修正後再加入。')
                         if item.get('source_station'):
                             st.caption(f"📍 截圖原始場站（僅參考）：{item['source_station']}")
+                        if item.get('lookup_detail'):
+                            st.caption(f"🔎 {item['lookup_detail']}")
                         if not located:
                             st.caption('目前位置尚未完成車號查詢，不能直接依截圖場站加入。')
                     rows.append({'加入': checked, **{LABELS[k]: item.get(k, '') for k in FIELDS}})
@@ -429,7 +430,7 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                     st.caption('只需修正有誤的內容；車號和目前場站由系統查詢，不能在此手動指定。')
                     edited = st.data_editor(
                         pd.DataFrame(rows), hide_index=True, num_rows='fixed',
-                        disabled=['加入', '場站', '設備編號', '照片場站（參考）'],
+                        disabled=['加入', '場站', '設備編號', '照片場站（參考）', '定位資訊'],
                         column_config={
                             '場站': st.column_config.TextColumn('目前場站（自動查詢）'),
                             '設備編號': st.column_config.TextColumn('車號'),
@@ -536,6 +537,8 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                     st.caption(f"{item['issued_at']}｜{item['description']}")
                     if item.get('source_station'):
                         st.caption(f"📍 截圖場站（僅參考）：{item['source_station']}")
+                    if item.get('lookup_detail'):
+                        st.caption(f"🔎 {item['lookup_detail']}")
                     if item['station_name'] not in names:
                         st.warning('此站不在目前配置範圍，待辦仍保留；請切換配置後安排路線。')
                     left, right = st.columns(2)
