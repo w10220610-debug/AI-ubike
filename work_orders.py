@@ -8,7 +8,7 @@ import unicodedata
 from pathlib import Path
 
 KEY = '__work_orders_v1__'
-DRAFT_SCHEMA = 'vehicle-location-v3'
+DRAFT_SCHEMA = 'vehicle-description-v4'
 
 def is_station_code(value):
     return bool(re.fullmatch(r'50\d{7}', str(value or '').strip()))
@@ -17,8 +17,8 @@ def is_bike_number(value):
     value = str(value or '').strip()
     return bool(re.fullmatch(r'[0-9]{6,10}', value)) and not is_station_code(value)
 
-FIELDS = ('station_name', 'kind', 'equipment', 'issued_at', 'description')
-LABELS = dict(zip(FIELDS, ('場站', '派工類型', '設備編號', '派工時間', '問題描述')))
+FIELDS = ('station_name', 'kind', 'equipment', 'issued_at', 'description', 'source_station')
+LABELS = dict(zip(FIELDS, ('場站', '派工類型', '設備編號', '派工時間', '問題描述', '照片場站（參考）')))
 
 
 def station_key(value):
@@ -72,53 +72,127 @@ def merge(cache, incoming):
 
 
 def parse_text(text, station_names):
-    """Keep uncertain rows for review; never silently fuzzy-match a station."""
-    names = {}
+    """Group OCR lines by vehicle, retain complete problem narratives for review.
+
+    Original image station is only a reference. Current location must still be
+    independently verified by the vehicle lookup before adding the order.
+    """
+    catalog = {}
     for name in station_names:
-        names.setdefault(station_key(name), []).append(name)
-    results = []
+        catalog.setdefault(station_key(name), []).append(name)
+
+    def exact_station(segment):
+        compact = station_key(segment)
+        hits = [key for key in catalog if key and key in compact]
+        maximal = [key for key in hits if not any(key != other and key in other for other in hits)]
+        return catalog[maximal[0]][0] if len(maximal) == 1 and len(catalog[maximal[0]]) == 1 else ''
+
+    def type_from(before, narrative):
+        before = re.sub(r'\s+', '', before)
+        narrative = re.sub(r'\s+', '', narrative)
+        if re.search(r'車輛電池|換電池|更換電池|換電', before):
+            return '車輛電池'
+        if '自行車' in before:
+            return '自行車'
+        for label in ('車輛故障', '補車', '收車', '綁車', '清潔', '巡檢'):
+            if label in before:
+                return label
+        if ('電量' in narrative and ('低於' in narrative or '%' in narrative)):
+            return '車輛電池'
+        if any(word in narrative for word in ('同站借還', '交易紀錄', '交易記錄', '在站超過', '更版失敗', '禁用')):
+            return '自行車'
+        if any(word in narrative for word in ('故障', '異常', '無法借', '無法還')):
+            return '車輛故障'
+        return ''
+
+    def attach(row, fragment):
+        fragment = str(fragment).strip(' \t|｜')
+        if not fragment or fragment in ('派工列表', '故障資訊', '維護描述'):
+            return
+        original = row.get('description', '')
+        if not original:
+            row['description'] = fragment
+        elif fragment not in original:
+            # Chinese OCR often breaks a sentence across several image rows.
+            spacer = ' ' if original[-1:].isascii() and fragment[:1].isascii() else ''
+            row['description'] = original + spacer + fragment
+        if not row.get('kind'):
+            row['kind'] = type_from('', row['description'])
+
+    rows, context, current = [], [], None
     issued = ''
-    date_re = re.compile(r'20\d{2}[./-]\d{1,2}[./-]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?')
-    for raw in str(text).splitlines():
+    timestamp_re = re.compile(r'20\d{2}[./-]\d{1,2}[./-]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?')
+    vehicle_re = re.compile(r'(?<![A-Za-z0-9])\d{6,10}(?!\d)')
+    for raw in str(text or '').splitlines():
         line = unicodedata.normalize('NFKC', raw).strip()
         if not line:
             continue
-        if '車輛號碼' in line and ('場站' in line or '故障資訊' in line):
+        compact = re.sub(r'\s+', '', line)
+        if ('車輛號碼' in compact or '設備編號' in compact) and (
+                '場站' in compact or '故障資訊' in compact or '派工類型' in compact):
             continue
-        stamp = date_re.search(line)
+        stamp = timestamp_re.search(line)
         if stamp:
             issued = stamp.group().replace('.', '-').replace('/', '-')
-            line = line[:stamp.start()] + line[stamp.end():]
-        compact = station_key(line)
-        if not compact:
+            current = None
+            context = []
+            line = timestamp_re.sub('', line).strip()
+            if not line:
+                continue
+        matches = [m for m in vehicle_re.finditer(line) if is_bike_number(m.group())]
+        if matches:
+            for index, match in enumerate(matches):
+                before = line[:match.start()] if index == 0 else ''
+                if context and index == 0:
+                    before = ' '.join(context + [before])
+                tail_end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
+                narrative = line[match.end():tail_end].strip(' \t|｜')
+                bike = match.group()
+                source_station = exact_station(before)
+                row = dict(
+                    station_name='', kind=type_from(before, narrative),
+                    equipment=bike, issued_at=issued, description=narrative,
+                    source_station=source_station, detected_name=before.strip(),
+                    selected=False, location_confirmed=False,
+                )
+                rows.append(row)
+                current = row
+            issued = ''
+            context = []
             continue
-        matches = [k for k in names if k and k in compact]
-        # Prefer a longer exact station name over its substring.
-        matches = [k for k in matches if not any(k != other and k in other for other in matches)]
-        kind = re.search(r'車\s*輛\s*電\s*池|換\s*電(?:\s*池)?|車\s*輛\s*故\s*障|故\s*障|補\s*車|收\s*車|綁\s*車|清\s*潔|巡\s*檢|電\s*池', line)
-        # YouBike station codes (50 + seven digits) are not vehicle numbers.
-        equipment_ids = [x for x in re.findall(r'(?<!\d)\d{6,10}(?!\d)', line)
-                         if not re.fullmatch(r'50\d{7}', x)]
-        equipment = equipment_ids[0] if equipment_ids else ''
-        if not matches and not kind and not equipment:
-            if results and line not in ('派工', '派工列表'):
-                results[-1]['description'] += ' ' + line
+        if compact in ('場站名稱', '派工類型', '設備編號', '維護描述', '故障資訊', '派工列表'):
             continue
-        name = names[matches[0]][0] if len(matches) == 1 and len(names[matches[0]]) == 1 else ''
-        guessed = line[:kind.start()].strip(' |｜') if kind else ''
-        # Station-name continuation lines belong to the printed reference only.
-        if name and not kind and not equipment and results:
-            results[-1]['description'] += ' ' + line
+        # Standalone station/type fragments preceding the vehicle ID should
+        # become its prefix, not be appended to the previous vehicle's problem.
+        standalone_station = exact_station(line)
+        if standalone_station and (station_key(line) == station_key(standalone_station)
+                                   or compact.endswith('車輛電池')
+                                   or compact.endswith('自行車')):
+            current = None
+            context.append(line)
             continue
-        for bike in equipment_ids or ['']:
-            results.append(dict(station_name='' if bike else name,
-                                kind=re.sub(r'\s+', '', kind.group()) if kind else '',
-                                equipment=bike, issued_at=issued, description=line,
-                                detected_name=guessed, source_station=name,
-                                selected=bool(name) and not bike))
-        issued = ""
-    return results
+        if current is not None:
+            attach(current, line)
+        else:
+            context.append(line)
 
+    if rows:
+        return rows
+
+    # Preserve the existing manual, station-only workflow when no vehicle
+    # number was recognized; never turn a date or station code into a bike.
+    fallback = []
+    for raw in str(text or '').splitlines():
+        line = unicodedata.normalize('NFKC', raw).strip()
+        name = exact_station(line)
+        if not name:
+            continue
+        kind = type_from(line, line)
+        if kind:
+            fallback.append(dict(station_name=name, kind=kind, equipment='',
+                                 issued_at='', description=line, source_station=name,
+                                 selected=True))
+    return fallback
 
 def badge_html(cache, station):
     import html
@@ -204,7 +278,7 @@ def prepare_vehicle_draft(state, prefix, names):
     if not isinstance(draft, list) or not draft:
         return
     state[prefix + '::legacy_draft'] = draft
-    if any(is_station_code(row.get('equipment')) for row in draft):
+    if state.get(prefix + '::text') or any(is_station_code(row.get('equipment')) for row in draft):
         original = state.get(prefix + '::text') or '\n'.join(str(row.get('description') or '') for row in draft)
         draft = parse_text(original, names)
     else:
@@ -242,7 +316,7 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
     prepare_vehicle_draft(st.session_state, prefix, names)
     component = components.declare_component('work_order_import', path=str(Path(__file__).with_name('work_order_component')))
     with st.expander(f'🟣 派工待辦｜{len(pending(cache))} 件未完成', expanded=False):
-        st.caption('截圖辨識車號後，自動查詢目前所在場站；已定位的車可以先加入。')
+        st.caption('自動擷取車號、派工類型及完整敘述，再查詢車輛目前場站；核對後加入。')
         epoch = st.session_state.get(prefix + '::reset_epoch', 0)
         current_draft = st.session_state.get(prefix + '::draft')
         prefill_bike_numbers = []
@@ -336,19 +410,26 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                         f"{'✅' if located else '⏳'} {bike or '未指定車號'}｜"
                         f"{station if located else '目前場站待查'}｜{kind or '派工類型待補'}"
                     )
-                    checked = st.checkbox(
-                        label,
-                        value=bool(item.get('selected')) and located,
-                        disabled=not located,
-                        key=f'{prefix}::select::{draft_version}::{index}',
-                    )
+                    with st.container(border=True):
+                        checked = st.checkbox(
+                            label,
+                            value=bool(item.get('selected')) and located,
+                            disabled=not located,
+                            key=f'{prefix}::select::{draft_version}::{index}',
+                        )
+                        st.markdown('**📝 派工完整敘述**')
+                        st.write(item.get('description') or '⚠️ 未辨識到問題敘述，請在下方修正後再加入。')
+                        if item.get('source_station'):
+                            st.caption(f"📍 截圖原始場站（僅參考）：{item['source_station']}")
+                        if not located:
+                            st.caption('目前位置尚未完成車號查詢，不能直接依截圖場站加入。')
                     rows.append({'加入': checked, **{LABELS[k]: item.get(k, '') for k in FIELDS}})
 
                 with st.popover('✏️ 修正派工類型／描述'):
                     st.caption('只需修正有誤的內容；車號和目前場站由系統查詢，不能在此手動指定。')
                     edited = st.data_editor(
                         pd.DataFrame(rows), hide_index=True, num_rows='fixed',
-                        disabled=['加入', '場站', '設備編號'],
+                        disabled=['加入', '場站', '設備編號', '照片場站（參考）'],
                         column_config={
                             '場站': st.column_config.TextColumn('目前場站（自動查詢）'),
                             '設備編號': st.column_config.TextColumn('車號'),
@@ -378,6 +459,7 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
             eligible = edited.apply(lambda row: (
                 str(row['場站']) in names and pd.notna(row['派工類型'])
                 and bool(str(row['派工類型']).strip())
+                and (not is_bike_number(row['設備編號']) or bool(str(row['問題描述']).strip()))
                 and not is_station_code(row['設備編號'])
                 and (not is_bike_number(row['設備編號'])
                      or (row['設備編號'], row['場站']) in verified)
@@ -452,6 +534,8 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
                     marker = {'done': '✅', 'blocked': '⏸', 'pending': '🟣'}[item['state']]
                     st.write(f"{marker} **{item['station_name']}**｜{item['kind']}｜{item['equipment'] or '未指定設備'}")
                     st.caption(f"{item['issued_at']}｜{item['description']}")
+                    if item.get('source_station'):
+                        st.caption(f"📍 截圖場站（僅參考）：{item['source_station']}")
                     if item['station_name'] not in names:
                         st.warning('此站不在目前配置範圍，待辦仍保留；請切換配置後安排路線。')
                     left, right = st.columns(2)
