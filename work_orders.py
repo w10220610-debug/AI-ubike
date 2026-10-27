@@ -38,6 +38,22 @@ def pending_names(cache):
     return list(dict.fromkeys(x['station_name'] for x in pending(cache)))
 
 
+def clear_added_orders(cache):
+    """Hide every saved order (including completed) without dropping sync tombstones."""
+    records = [item for item in orders(cache) if item.get('state') != 'deleted']
+    if not records:
+        return 0
+    now = time.time()
+    for item in records:
+        try:
+            previous = float(item.get('updated_at') or 0)
+        except (TypeError, ValueError):
+            previous = 0
+        # A newer deletion survives older localStorage/backup snapshots.
+        item.update(state='deleted', updated_at=max(now, previous + 0.001))
+    return len(records)
+
+
 def identity(row):
     # A timestamp distinguishes later assignments to the same equipment.
     parts = [station_key(row.get(k)) for k in FIELDS[:4]]
@@ -525,6 +541,29 @@ def render_manager(status_df, *, cache, token, page_mode, save, route_station_ma
             value=False,
             key=prefix + '::show_tasks',
         ):
+            active_orders = [x for x in orders(cache) if x.get('state') != 'deleted']
+            if active_orders:
+                with st.popover('🗑️ 一鍵清除已加入派工'):
+                    st.warning(
+                        f'確定要清除全部 {len(active_orders)} 筆已加入派工嗎？'
+                        '包含未完成、暫緩與已完成紀錄；'
+                        '不會清除上級 EMS 派工，也不會清除目前尚未加入的辨識清單。'
+                    )
+                    if st.button(
+                        f'確認清除全部 {len(active_orders)} 筆',
+                        key=prefix + '::clear_all_added',
+                        type='primary',
+                        use_container_width=True,
+                    ):
+                        removed = clear_added_orders(cache)
+                        if removed:
+                            save()
+                            st.session_state[prefix + '::notice'] = (
+                                f'✅ 已清除 {removed} 筆已加入派工；尚未加入的辨識清單仍保留。'
+                            )
+                        st.rerun()
+            else:
+                st.caption('目前沒有已加入的派工可清除。')
             show_done = st.checkbox('顯示已完成派工／復原', key=prefix + '::show_done')
             for item in list(orders(cache)):
                 if item['state'] == 'deleted':
