@@ -1,32 +1,57 @@
 """Small button editor; reuses the dispatch fragment and does not fetch data."""
+from hashlib import sha1
 from cargo_order import label, validate
 
 
 def editor(st, key, initial, capacity, rerun, *, disabled=False):
     st.session_state.setdefault(key, list(initial))
     order = list(st.session_state[key])
-    st.caption('由車頭排到車尾；新車加在車尾。點車種可切換，↑↓可交換位置。')
-    st.write(label(order))
-    for i, kind in enumerate(order):
-        cols = st.columns([3, 1, 1])
-        if cols[0].button(f'{i + 1}｜' + ('一般車' if kind == 'bike' else '電車'), key=f'{key}:type:{i}', disabled=disabled):
-            order[i] = 'ebike' if kind == 'bike' else 'bike'
-            st.session_state[key] = order
-            rerun()
-        for col, delta, title in ((cols[1], -1, '↑'), (cols[2], 1, '↓')):
-            j = i + delta
-            if col.button(title, key=f'{key}:move:{i}:{delta}', disabled=disabled or not 0 <= j < len(order)):
-                order[i], order[j] = order[j], order[i]
+    # Scope mobile overrides to this editor, never to other app columns.
+    container_key = 'cargo_compact_' + sha1(key.encode()).hexdigest()[:12]
+    selector = '.st-key-' + container_key
+    st.markdown(f'''<style>
+    {selector} [data-testid="stHorizontalBlock"] {{
+        flex-direction:row !important; flex-wrap:nowrap !important;
+        gap:6px !important; align-items:center !important;
+    }}
+    {selector} [data-testid="stColumn"] {{
+        min-width:0 !important; width:auto !important;
+        flex:1 1 0% !important;
+    }}
+    {selector} [data-testid="stVerticalBlock"] {{gap:5px !important;}}
+    {selector} [data-testid="stColumn"]:first-child {{flex:3 1 0% !important;}}
+    {selector} .st-key-{container_key}_actions [data-testid="stColumn"] {{flex:1 1 0% !important;}}
+    {selector} button {{
+        width:100% !important; min-height:44px !important; height:44px !important;
+        padding:4px 8px !important; margin:0 !important; border-radius:10px !important;
+        box-shadow:none !important; font-size:14px !important;
+    }}
+    {selector} button p {{font-size:14px !important; white-space:nowrap; margin:0 !important;}}
+    {selector} [data-testid="stCaptionContainer"] p {{font-size:12px !important; margin:0 !important;}}
+    </style>''', unsafe_allow_html=True)
+    with st.container(key=container_key):
+        st.caption(f'車頭 ↓ 車尾先卸 · 一般 {order.count("bike")}／電 {order.count("ebike")} · {len(order)}/{capacity}')
+        for i, kind in enumerate(order):
+            cols = st.columns([3, 1, 1])
+            if cols[0].button(f'{i + 1:02d}　' + ('一般車' if kind == 'bike' else '電車') + (' · 車頭' if i == 0 else '') + (' · 車尾' if i == len(order) - 1 else ''), key=f'{key}:type:{i}', disabled=disabled):
+                order[i] = 'ebike' if kind == 'bike' else 'bike'
                 st.session_state[key] = order
                 rerun()
-    cols = st.columns(3)
-    for col, kind, title in ((cols[0], 'bike', '＋一般車'), (cols[1], 'ebike', '＋電車')):
-        if col.button(title, key=f'{key}:add:{kind}', disabled=disabled or len(order) >= capacity):
-            st.session_state[key] = order + [kind]
-            rerun()
-    if cols[2].button('移除車尾', key=f'{key}:pop', disabled=disabled or not order):
-        st.session_state[key] = order[:-1]
-        rerun()
+            for col, delta, title in ((cols[1], -1, '↑'), (cols[2], 1, '↓')):
+                j = i + delta
+                if col.button(title, key=f'{key}:move:{i}:{delta}', disabled=disabled or not 0 <= j < len(order)):
+                    order[i], order[j] = order[j], order[i]
+                    st.session_state[key] = order
+                    rerun()
+        with st.container(key=container_key + "_actions"):
+            cols = st.columns(3)
+            for col, kind, title in ((cols[0], 'bike', '＋一般'), (cols[1], 'ebike', '＋電車')):
+                if col.button(title, key=f'{key}:add:{kind}', disabled=disabled or len(order) >= capacity):
+                    st.session_state[key] = order + [kind]
+                    rerun()
+            if cols[2].button('移除車尾', key=f'{key}:pop', disabled=disabled or not order):
+                st.session_state[key] = order[:-1]
+                rerun()
     return order
 
 
