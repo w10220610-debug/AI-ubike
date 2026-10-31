@@ -126,6 +126,8 @@ class FakeUI:
     def expander(self, *a, **kw): return self
     def __enter__(self): return self
     def __exit__(self, *args): pass
+    def container(self, *a, **kw): return self
+    def markdown(self, *a, **kw): pass
     def caption(self, *a): pass
     def write(self, *a): pass
     def columns(self, widths): return [self] * (widths if isinstance(widths, int) else len(widths))
