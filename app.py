@@ -4,6 +4,10 @@
 
 from __future__ import annotations
 
+from cargo_order import (order_context, scoped_order, tail_unload, complete as complete_cargo,
+                         loading_order, choose_loading, label as cargo_label)
+from cargo_order_ui import settings as cargo_settings, editor as cargo_editor, rerun_fragment as cargo_rerun
+
 V29_COMPATIBILITY_NOTES = """V29 formal full-version integration notes.
 
 These capabilities are integrated directly into the production app runtime.
@@ -2993,6 +2997,10 @@ def runtime_state_cache_path(token: str) -> Path:
 
 
 SMART_DISPATCH_PERSISTED_SUFFIXES = (
+    "::cargo_order",
+    "::cargo_ready",
+    "::cargo_enabled",
+    "::cargo_was_enabled",
     "::active_trip",
     "::cooldowns",
     "::decision_round",
@@ -4518,6 +4526,12 @@ st.set_page_config(
 
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
+
+**2026/11/01｜選用車上排列調度**
+- 智慧調度新增預設關閉的「依車上排列調度」，單列由車頭記錄至車尾；未勾選維持原本推薦。
+- 按鈕設定車種／交換位置，確認後自動統計數量；只推薦能從車尾依序卸下的車輛。
+- 依既有站點缺口比較裝車順序，完成本站後自動更新排列；可反轉或逐台修改本次上車順序。
+- 排列計算不新增車況、AI 或道路查詢，沿用局部更新與既有資料；仍有 Streamlit 互動傳輸，非離線零流量。
 
 **2026/10/27｜派工已加入清單一鍵批次清除（功能更新）**
 - 在「查看／管理已加入派工」增加「一鍵清除已加入派工」，打開確認提示後可一次清除未完成、暫緩及已完成派工。
@@ -9304,6 +9318,7 @@ def summarize_loop_preview(preview: list[dict]) -> tuple[float, int, float, int]
     return (efficiency, total_dispatch, -total_minutes, len(zones))
 
 
+@scoped_order
 def build_long_distance_route_preview(
     dispatch_df: pd.DataFrame,
     *,
@@ -9404,6 +9419,8 @@ def build_long_distance_route_preview(
                 - safe_nonnegative_int(chosen.get("pickup_ebike"))
             )
             work_df = work_df.loc[~station_mask].reset_index(drop=True)
+            if "cargo_after" in chosen:
+                order_context.set(list(chosen["cargo_after"]))
             simulated_truck_bike = safe_nonnegative_int(chosen.get("truck_after_bike"))
             simulated_truck_ebike = safe_nonnegative_int(chosen.get("truck_after_ebike"))
             simulated_location = {
@@ -10233,6 +10250,7 @@ def build_dispatch_plan_for_station(
     max_capacity: int,
     global_bike_shortage: int,
     global_ebike_shortage: int,
+    cargo_rows=(),
 ) -> dict | None:
     """依車上存量及總容量，模擬本站先下車後上車的最大可行調度量。"""
     current_bike = normalize_current_status(row.get("2.0 現況"))
@@ -10254,6 +10272,13 @@ def build_dispatch_plan_for_station(
 
     unload_bike = min(bike_shortage, truck_bike)
     unload_ebike = min(ebike_shortage, truck_ebike)
+    cargo = order_context.get()
+    remaining = None
+    if cargo is not None:
+        if cargo.count("bike") != truck_bike or cargo.count("ebike") != truck_ebike:
+            return None  # Never silently plan against stale or simulated counts.
+        remaining, down = tail_unload(cargo, bike_shortage, ebike_shortage)
+        unload_bike, unload_ebike = down["bike"], down["ebike"]
     bike_after_unload = truck_bike - unload_bike
     ebike_after_unload = truck_ebike - unload_ebike
     free_capacity = max(0, max_capacity - bike_after_unload - ebike_after_unload)
@@ -10276,6 +10301,12 @@ def build_dispatch_plan_for_station(
     if dispatch_count <= 0 and not work_order_pending(status_cache, row.get('場站名稱')):
         return None
 
+    cargo_fields = {}
+    if cargo is not None:
+        pickup_order, hint = choose_loading(remaining, pickup_bike, pickup_ebike,
+                                            cargo_rows, row.get("場站名稱"))
+        cargo_fields = {"cargo_before": list(cargo), "cargo_pickup": pickup_order,
+                        "cargo_after": remaining + pickup_order, "cargo_hint": hint}
     final_bike = bike_after_unload + pickup_bike
     final_ebike = ebike_after_unload + pickup_ebike
     if final_bike + final_ebike > max_capacity:
@@ -10302,6 +10333,7 @@ def build_dispatch_plan_for_station(
         "dispatch_count": dispatch_count,
         "truck_before_bike": safe_nonnegative_int(truck_bike),
         "truck_before_ebike": safe_nonnegative_int(truck_ebike),
+        **cargo_fields,
         "truck_after_bike": final_bike,
         "truck_after_ebike": final_ebike,
         "max_capacity": safe_nonnegative_int(max_capacity),
@@ -10339,7 +10371,8 @@ def calculate_dispatch_candidates(
     prepared: list[tuple[dict, dict, float, float]] = []
     destinations: list[tuple[str, float, float]] = []
     # to_dict(records) 比 iterrows 更輕；先排除無調度量或無座標場站，再送道路矩陣。
-    for row in valid_df.to_dict(orient="records"):
+    cargo_rows = valid_df.to_dict(orient="records")
+    for row in cargo_rows:
         station_name = str(row.get("場站名稱") or "").strip()
         if not station_name:
             continue
@@ -10362,6 +10395,7 @@ def calculate_dispatch_candidates(
             max_capacity=max_capacity,
             global_bike_shortage=global_bike_shortage,
             global_ebike_shortage=global_ebike_shortage,
+            cargo_rows=cargo_rows,
         )
         if plan is None:
             continue
@@ -10513,8 +10547,12 @@ def inspect_dispatch_station(
         max_capacity=max_capacity,
         global_bike_shortage=int((standard_bike_series - current_bike_series).clip(lower=0).fillna(0).sum()),
         global_ebike_shortage=int((standard_ebike_series - current_ebike_series).clip(lower=0).fillna(0).sum()),
+        cargo_rows=dispatch_df.to_dict(orient="records"),
     )
     if plan is None:
+        if order_context.get() is not None:
+            base["reason"] = "依目前車尾排列、載量與本站需求，沒有可直接執行的上下車方案。"
+            return base
         bike_diff = int(base["current_bike"]) - int(base["standard_bike"])
         ebike_diff = int(base["current_ebike"]) - int(base["standard_ebike"])
         if bike_diff == 0 and ebike_diff == 0:
@@ -10771,6 +10809,13 @@ def render_dispatch_plan_card(plan: dict, *, title: str) -> None:
     station_name = str(plan.get("station_name") or "").strip()
     station_name_attr = html.escape(station_name, quote=True)
     st.markdown(work_order_badge(status_cache, station_name), unsafe_allow_html=True)
+    if "cargo_after" in plan:
+        st.caption("依車尾順序下車，然後按以下順序上車")
+        pickup_text = " → ".join("一般車" if x == "bike" else "電車" for x in plan["cargo_pickup"])
+        st.write("上車先後：" + (pickup_text or "本次不上車"))
+        st.write("完成後：" + cargo_label(plan["cargo_after"]))
+        if plan.get("cargo_hint"):
+            st.caption(f"依現有缺口，此排列方便在 {plan['cargo_hint']} 卸車；僅為裝車參考，正式下一站於完成後依道路與優先場站重算。")
     before_bike, before_ebike = _dispatch_truck_before_counts(plan)
     after_bike = safe_nonnegative_int(plan.get("truck_after_bike"))
     after_ebike = safe_nonnegative_int(plan.get("truck_after_ebike"))
@@ -10945,6 +10990,7 @@ def render_dispatch_auxiliary_panels(
                 )
             st.dataframe(pd.DataFrame(history_rows), hide_index=True, use_container_width=True)
 
+@scoped_order
 def render_smart_dispatch(
     *,
     full_status_df: pd.DataFrame,
@@ -11130,6 +11176,11 @@ def render_smart_dispatch(
         for key in (max_capacity_input_key, truck_bike_input_key, truck_ebike_input_key)
     )
 
+    cargo, cargo_ready = cargo_settings(
+        st, dispatch_prefix, int(st.session_state.get(max_capacity_input_key, 14)),
+        trip_locked, lambda: cargo_rerun(st),
+    )
+    order_context.set(cargo)
     settings_title = "🚚 貨車載量設定" + ("（前往中已鎖定）" if trip_locked else "")
     with st.expander(settings_title, expanded=not has_saved_truck_settings and not trip_locked):
         control_col_1, control_col_2, control_col_3 = st.columns(3)
@@ -11151,7 +11202,7 @@ def render_smart_dispatch(
                 value=0,
                 step=1,
                 key=truck_bike_input_key,
-                disabled=trip_locked,
+                disabled=trip_locked or cargo is not None,
             ))
         with control_col_3:
             truck_ebike = int(st.number_input(
@@ -11161,9 +11212,13 @@ def render_smart_dispatch(
                 value=0,
                 step=1,
                 key=truck_ebike_input_key,
-                disabled=trip_locked,
+                disabled=trip_locked or cargo is not None,
             ))
 
+    if cargo is not None:
+        if not cargo_ready or cargo.count("bike") != truck_bike or cargo.count("ebike") != truck_ebike:
+            st.warning("請先確認車上排列；確認後會自動統計車種數量。")
+            return
     total_on_truck = truck_bike + truck_ebike
     render_dispatch_truck_status(
         truck_bike=truck_bike,
@@ -11403,6 +11458,16 @@ def render_smart_dispatch(
                                 full_status_df, str(voice_event.get("target_text") or "")
                             )
 
+        actual_cargo_pickup = None
+        if "cargo_before" in active_trip:
+            with st.expander("調整本次上車順序（沒變動可直接完成本站）", expanded=False):
+                pickup_key = f"{dispatch_prefix}::cargo_pickup::{trip_id}"
+                st.session_state.setdefault(pickup_key, list(active_trip["cargo_pickup"]))
+                if st.button("反轉本次上車順序", key=pickup_key + ":reverse"):
+                    st.session_state[pickup_key] = list(reversed(st.session_state[pickup_key]))
+                    cargo_rerun(st)
+                actual_cargo_pickup = cargo_editor(st, pickup_key, active_trip["cargo_pickup"], max_capacity, lambda: cargo_rerun(st))
+                st.caption("只調整本次新上車的車輛。若實際上車數量有變，也請同步修改下方實際數量。")
         with st.expander("現場變數／修改實際上下車數量", expanded=True):
             with st.form(key=f"{dispatch_prefix}::complete_trip_form::{trip_id}", clear_on_submit=False):
                 action_col_1, action_col_2 = st.columns(2)
@@ -11507,6 +11572,15 @@ def render_smart_dispatch(
                 )
 
                 errors: list[str] = []
+                cargo_after = None
+                if "cargo_before" in active_trip:
+                    try:
+                        if actual_cargo_pickup.count("bike") != actual_pickup_bike or actual_cargo_pickup.count("ebike") != actual_pickup_ebike:
+                            raise ValueError("本次上車排列與實際上車數量不同，請展開「調整本次上車順序」修正")
+                        cargo_after = complete_cargo(active_trip["cargo_before"], actual_unload_bike,
+                                                     actual_unload_ebike, actual_cargo_pickup, max_capacity)
+                    except ValueError as exc:
+                        errors.append(str(exc))
                 if actual_unload_bike > operation_start_bike:
                     errors.append("實際下車的 2.0 超過車上現有數量")
                 if actual_unload_ebike > operation_start_ebike:
@@ -11548,6 +11622,12 @@ def render_smart_dispatch(
                             active_base=active_base,
                             default_context_key=current_context_key,
                         )
+                        if cargo_after is not None:
+                            st.session_state[dispatch_prefix + "::cargo_order"] = cargo_after
+                            st.session_state[dispatch_prefix + "::cargo_ready"] = True
+                            st.session_state.pop(dispatch_prefix + "::cargo_draft", None)
+                        else:
+                            st.session_state[dispatch_prefix + "::cargo_ready"] = False
                         st.session_state[pending_truck_key] = {
                             "bike": final_truck_bike,
                             "ebike": final_truck_ebike,
@@ -13347,3 +13427,4 @@ render_general_analysis_results_fragment(
     all_status_df=base_df,
     status_cache=status_cache,
 )
+
