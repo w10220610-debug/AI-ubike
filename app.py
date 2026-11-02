@@ -5,9 +5,50 @@
 from __future__ import annotations
 
 from cargo_order import (order_context, scoped_order, tail_unload, complete as complete_cargo,
-                         loading_order, choose_loading, label as cargo_label)
-from cargo_order_ui import (settings as cargo_settings, editor as cargo_editor,
-                            rerun_fragment as cargo_rerun, recover_locked_cargo)
+                         loading_order, choose_loading, label as cargo_label, validate as validate_cargo)
+from cargo_order_ui import settings as cargo_settings, editor as cargo_editor, rerun_fragment as cargo_rerun
+
+
+def recover_locked_cargo(st, prefix, active_trip, capacity):
+    """Restore a confirmed, locked trip snapshot after an iPhone/WebSocket reconnect.
+
+    A draft is never authoritative: the trip's cargo_before is the sequence
+    actually accepted when this destination was locked. Reject corrupt snapshots.
+    """
+    if not isinstance(active_trip, dict):
+        return False
+    state = st.session_state
+    enabled_key = prefix + '::cargo_enabled'
+    if 'cargo_before' not in active_trip:
+        # A trip accepted in ordinary mode must not inherit a stale cargo toggle.
+        if state.get(enabled_key):
+            state[enabled_key] = False
+            state[prefix + '::cargo_was_enabled'] = False
+        return False
+    try:
+        snapshot = validate_cargo(active_trip['cargo_before'], capacity)
+    except ValueError:
+        return False
+    if (snapshot.count('bike') != active_trip.get('truck_before_bike')
+            or snapshot.count('ebike') != active_trip.get('truck_before_ebike')):
+        return False
+    restored = {
+        enabled_key: True,
+        prefix + '::cargo_was_enabled': True,
+        prefix + '::cargo_order': snapshot,
+        prefix + '::cargo_ready': True,
+        prefix + '::truck_bike': snapshot.count('bike'),
+        prefix + '::truck_ebike': snapshot.count('ebike'),
+    }
+    for key, value in restored.items():
+        if state.get(key) != value:
+            state[key] = value
+    # An unconfirmed draft may outlive the confirmation widget, but cannot
+    # invalidate the already-locked trip or block completing/cancelling it.
+    state.pop(prefix + '::cargo_draft', None)
+    return True
+
+
 
 V29_COMPATIBILITY_NOTES = """V29 formal full-version integration notes.
 
