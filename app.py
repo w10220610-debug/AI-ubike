@@ -6,7 +6,8 @@ from __future__ import annotations
 
 from cargo_order import (order_context, scoped_order, tail_unload, complete as complete_cargo,
                          loading_order, choose_loading, label as cargo_label)
-from cargo_order_ui import settings as cargo_settings, editor as cargo_editor, rerun_fragment as cargo_rerun
+from cargo_order_ui import (settings as cargo_settings, editor as cargo_editor,
+                            rerun_fragment as cargo_rerun, recover_locked_cargo)
 
 V29_COMPATIBILITY_NOTES = """V29 formal full-version integration notes.
 
@@ -4652,6 +4653,12 @@ _UPDATE_CONTENT_MD = f"""
 _BUG_FIX_CONTENT_MD = """
 #### 🐞 BUG 修復紀錄
 > 僅記錄已實際完成的修復；單純新增功能不列入。
+
+**2026/11/03｜iPhone 切換 App 後車上排列確認卡死**
+- 已鎖定目的地時從行程快照還原確認過的車頭至車尾排列與車種數量，清除未送出的舊草稿，避免返回 App 後無法再次確認。
+- 真正空車且沒有未確認草稿時自動通過排列確認；非空車不會跳過人工確認。
+- 即使鎖定行程的排列快照發生異常，也允許完成或取消本站，不再由確認警告直接中斷整個調度畫面。
+- 不重新載入整頁、不重新查詢車況、不改變原本智慧推薦與車尾先卸限制；本次為 BUG 修復，不計功能升版。
 
 **2026/10/25｜精簡派工介面勾選狀態清理**
 - 「清除本次辨識」同步清除逐車勾選狀態，避免重新辨識時殘留舊的選取資料。
@@ -11176,6 +11183,11 @@ def render_smart_dispatch(
         for key in (max_capacity_input_key, truck_bike_input_key, truck_ebike_input_key)
     )
 
+    if trip_locked:
+        recover_locked_cargo(
+            st, dispatch_prefix, active_trip,
+            int(st.session_state.get(max_capacity_input_key, 14)),
+        )
     cargo, cargo_ready = cargo_settings(
         st, dispatch_prefix, int(st.session_state.get(max_capacity_input_key, 14)),
         trip_locked, lambda: cargo_rerun(st),
@@ -11217,8 +11229,14 @@ def render_smart_dispatch(
 
     if cargo is not None:
         if not cargo_ready or cargo.count("bike") != truck_bike or cargo.count("ebike") != truck_ebike:
-            st.warning("請先確認車上排列；確認後會自動統計車種數量。")
-            return
+            if trip_locked:
+                # Allow the already-accepted station to be completed/cancelled
+                # even if recovered cargo state is inconsistent or incomplete.
+                order_context.set(None)
+                st.warning("車上排列狀態未恢復；已鎖定的本站仍可完成或取消，不會依未確認排列重新推薦。")
+            else:
+                st.warning("請先確認車上排列；確認後會自動統計車種數量。")
+                return
     total_on_truck = truck_bike + truck_ebike
     render_dispatch_truck_status(
         truck_bike=truck_bike,
