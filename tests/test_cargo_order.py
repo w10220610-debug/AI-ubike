@@ -1,4 +1,5 @@
 import ast
+import importlib
 import itertools
 from pathlib import Path
 import unittest
@@ -27,6 +28,44 @@ def load_plan():
 def row(name='A', b=0, e=0, bs=2, es=3):
     return {'場站名稱': name, '2.0 現況': b, '2.0E 現況': e,
             '2.0 標準': bs, '2.0E 標準': es, '服務狀態': 1}
+
+
+
+class CargoStartupImports(unittest.TestCase):
+    def test_app_imports_are_exported_by_cargo_modules(self):
+        # Parse without running Streamlit so deployment-time name mismatches
+        # fail CI (py_compile alone does not validate imported symbols).
+        tree = ast.parse((ROOT / 'app.py').read_text(encoding='utf-8'))
+        for stmt in tree.body:
+            if isinstance(stmt, ast.ImportFrom) and stmt.module in (
+                    'cargo_order', 'cargo_order_ui'):
+                module = importlib.import_module(stmt.module)
+                for name in stmt.names:
+                    self.assertTrue(
+                        hasattr(module, name.name),
+                        f'app.py imports missing {stmt.module}.{name.name}'
+                    )
+
+    def test_app_local_locked_recovery_preserves_order(self):
+        from cargo_order import validate
+        tree = ast.parse((ROOT / 'app.py').read_text(encoding='utf-8'))
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == 'recover_locked_cargo')
+        env = {'validate_cargo': validate}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), 'app.py', 'exec'), env)
+        ui = type('FakeState', (), {'session_state': {
+            'test::cargo_order': [],
+            'test::cargo_ready': False,
+            'test::cargo_draft': ['ebike'],
+        }})()
+        trip = {'cargo_before': ['bike', 'ebike', 'bike'],
+                'truck_before_bike': 2, 'truck_before_ebike': 1}
+        self.assertTrue(env['recover_locked_cargo'](ui, 'test', trip, 14))
+        self.assertEqual(ui.session_state['test::cargo_order'],
+                         ['bike', 'ebike', 'bike'])
+        self.assertTrue(ui.session_state['test::cargo_ready'])
+        self.assertNotIn('test::cargo_draft', ui.session_state)
 
 
 class CargoTests(unittest.TestCase):
