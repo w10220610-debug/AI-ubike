@@ -1,4 +1,5 @@
 import ast
+import html
 import importlib
 import itertools
 from pathlib import Path
@@ -253,3 +254,97 @@ class CargoUITests(unittest.TestCase):
         self.settings(ui)
         self.assertEqual(ui.session_state['test::truck_bike'], 2)
         self.assertEqual(ui.session_state['test::truck_ebike'], 1)
+
+
+class CargoCardHTMLTests(unittest.TestCase):
+    """Regression for Streamlit card markup without importing a live Streamlit app."""
+
+    def setUp(self):
+        tree = ast.parse((ROOT / 'app.py').read_text(encoding='utf-8'))
+        functions = [
+            n for n in tree.body if isinstance(n, ast.FunctionDef)
+            and n.name in {
+                '_dispatch_cargo_chips',
+                '_dispatch_truck_before_counts',
+                'render_dispatch_plan_card',
+            }
+        ]
+        self.assertEqual(len(functions), 3)
+        self.html_fragments = []
+        class FakeStreamlit:
+            def __init__(self, rendered):
+                self.rendered = rendered
+            def markdown(self, markup, **kwargs):
+                self.rendered.append(markup)
+        env = {
+            'st': FakeStreamlit(self.html_fragments),
+            'html': html,
+            'status_cache': {},
+            'work_order_badge': lambda cache, name: '',
+            'safe_nonnegative_int': lambda n: max(0, int(n or 0)),
+            'binding_requirement_display_text': lambda value: '',
+            'vehicle_balance_text': lambda current, standard: f'{current} / {standard}',
+            'optional_count_text': lambda value: str(value if value is not None else '—'),
+            'dispatch_action_text': lambda plan: '本站作業正常',
+        }
+        exec(compile(ast.Module(body=functions, type_ignores=[]), 'app.py', 'exec'), env)
+        self.chips = env['_dispatch_cargo_chips']
+        self.render = env['render_dispatch_plan_card']
+
+    def plan(self):
+        return {
+            'station_name': '大同路與精誠路口', 'region': '台東市',
+            'dispatch_count': 6, 'current_bike': 7, 'current_ebike': 7,
+            'standard_bike': 3, 'standard_ebike': 5,
+            'total_bikes': 14, 'empty_spaces': 4, 'parking_spaces': 18,
+            'truck_before_bike': 0, 'truck_before_ebike': 0,
+            'truck_after_bike': 4, 'truck_after_ebike': 2,
+            'max_capacity': 15, 'routing_fallback': False,
+            'road_detour_ratio': 1.0,
+            'cargo_pickup': ['bike'] * 4 + ['ebike'] * 2,
+            'cargo_after': ['bike'] * 4 + ['ebike'] * 2,
+            'cargo_hint': '下一站',
+        }
+
+    def test_loading_advice_inside_station_card(self):
+        self.render(self.plan(), title='已同意前往／目的地已鎖定')
+        card = self.html_fragments[-1]
+        self.assertEqual(card.count('dispatch-plan-card"'), 1)
+        self.assertIn('本站作業', card)
+        self.assertGreater(card.index('dispatch-cargo-panel'), card.index('本站作業'))
+        self.assertIn('🍌', card)
+        self.assertIn('🍊', card)
+        self.assertIn('一般車 2.0 ×4', card)
+        self.assertIn('電車 2.0E ×2', card)
+        self.assertIn('<details class="dispatch-cargo-details">', card)
+        self.assertNotIn('<div class="dispatch-plan-grid">', card)
+        for removed in ('路網距離', '行車時間', '預估總時間', '綜合效益'):
+            self.assertNotIn(removed, card)
+
+    def test_non_order_mode_keeps_card_without_extra_panel(self):
+        plan = self.plan()
+        for key in ('cargo_pickup', 'cargo_after', 'cargo_hint'):
+            del plan[key]
+        self.render(plan, title='推薦場站')
+        card = self.html_fragments[-1]
+        self.assertIn('dispatch-plan-card', card)
+        self.assertNotIn('dispatch-cargo-panel', card)
+        self.assertIn('目前車上數量', card)
+
+    def test_mixed_sequence_keeps_actual_interleaving(self):
+        view = self.chips(['bike', 'ebike', 'bike', 'bike'])
+        self.assertEqual(view.count('dispatch-cargo-chip dispatch-cargo-'), 3)
+        self.assertEqual(view.count('dispatch-cargo-arrow'), 2)
+        self.assertLess(view.index('🍌'), view.index('🍊'))
+        self.assertLess(view.index('🍊'), view.rindex('🍌'))
+        self.assertIn('一般車 2.0 ×2', view)
+        self.assertIn('本次不上車', self.chips([]))
+        self.assertIn('排列資料待確認', self.chips(['invalid']))
+
+    def test_hint_escapes_untrusted_station_name(self):
+        plan = self.plan()
+        plan['cargo_hint'] = '<img src=x onerror=alert(1)>'
+        self.render(plan, title='測試')
+        card = self.html_fragments[-1]
+        self.assertNotIn('<img', card)
+        self.assertIn('&lt;img', card)
