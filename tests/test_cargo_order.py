@@ -142,12 +142,49 @@ class CargoUITests(unittest.TestCase):
     def test_default_is_off(self):
         self.assertEqual(self.settings(FakeUI()), (None, True))
 
-    def test_enable_requires_confirmation_even_when_empty(self):
+    def test_empty_truck_is_automatically_ready(self):
         ui = FakeUI(True)
-        self.assertEqual(self.settings(ui), ([], False))
-        ui.clicked = 'test::cargo_confirm'
-        self.settings(ui)
+        self.assertEqual(self.settings(ui), ([], True))
         self.assertTrue(ui.session_state['test::cargo_ready'])
+
+    def test_unconfirmed_nonempty_draft_is_not_autoconfirmed(self):
+        ui = FakeUI(True)
+        ui.session_state['test::cargo_draft'] = ['bike']
+        self.assertEqual(self.settings(ui), ([], False))
+
+    def test_locked_snapshot_restores_confirmed_order_and_counts(self):
+        from cargo_order_ui import recover_locked_cargo, settings
+        ui = FakeUI(True)
+        ui.session_state.update({
+            'test::cargo_enabled': True, 'test::cargo_was_enabled': True,
+            'test::cargo_ready': False, 'test::cargo_order': [],
+            'test::cargo_draft': ['ebike', 'bike'],
+            'test::truck_bike': 0, 'test::truck_ebike': 0,
+        })
+        trip = {'cargo_before': ['bike', 'ebike', 'bike'],
+                'truck_before_bike': 2, 'truck_before_ebike': 1}
+        self.assertTrue(recover_locked_cargo(ui, 'test', trip, 14))
+        self.assertEqual(ui.session_state['test::cargo_order'], ['bike', 'ebike', 'bike'])
+        self.assertEqual((ui.session_state['test::truck_bike'],
+                          ui.session_state['test::truck_ebike']), (2, 1))
+        self.assertNotIn('test::cargo_draft', ui.session_state)
+        self.assertEqual(settings(ui, 'test', 14, True, lambda: None),
+                         (['bike', 'ebike', 'bike'], True))
+
+    def test_invalid_locked_snapshot_does_not_silently_confirm(self):
+        from cargo_order_ui import recover_locked_cargo
+        ui = FakeUI(True)
+        trip = {'cargo_before': ['bike', 'ebike'],
+                'truck_before_bike': 2, 'truck_before_ebike': 0}
+        self.assertFalse(recover_locked_cargo(ui, 'test', trip, 14))
+        self.assertNotIn('test::cargo_ready', ui.session_state)
+
+    def test_ordinary_locked_trip_does_not_enable_cargo_order(self):
+        from cargo_order_ui import recover_locked_cargo
+        ui = FakeUI(True)
+        ui.session_state['test::cargo_enabled'] = True
+        self.assertFalse(recover_locked_cargo(ui, 'test', {'station_name': 'A'}, 14))
+        self.assertFalse(ui.session_state['test::cargo_enabled'])
 
     def test_reenable_requires_confirmation_even_if_counts_same(self):
         ui = FakeUI(True)
