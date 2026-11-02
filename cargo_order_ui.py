@@ -55,6 +55,47 @@ def editor(st, key, initial, capacity, rerun, *, disabled=False):
     return order
 
 
+
+def recover_locked_cargo(st, prefix, active_trip, capacity):
+    """Restore a confirmed, locked trip snapshot after an iPhone/WebSocket reconnect.
+
+    A draft is never authoritative: the trip's cargo_before is the sequence
+    actually accepted when this destination was locked. Reject corrupt snapshots.
+    """
+    if not isinstance(active_trip, dict):
+        return False
+    state = st.session_state
+    enabled_key = prefix + '::cargo_enabled'
+    if 'cargo_before' not in active_trip:
+        # A trip accepted in ordinary mode must not inherit a stale cargo toggle.
+        if state.get(enabled_key):
+            state[enabled_key] = False
+            state[prefix + '::cargo_was_enabled'] = False
+        return False
+    try:
+        snapshot = validate(active_trip['cargo_before'], capacity)
+    except ValueError:
+        return False
+    if (snapshot.count('bike') != active_trip.get('truck_before_bike')
+            or snapshot.count('ebike') != active_trip.get('truck_before_ebike')):
+        return False
+    restored = {
+        enabled_key: True,
+        prefix + '::cargo_was_enabled': True,
+        prefix + '::cargo_order': snapshot,
+        prefix + '::cargo_ready': True,
+        prefix + '::truck_bike': snapshot.count('bike'),
+        prefix + '::truck_ebike': snapshot.count('ebike'),
+    }
+    for key, value in restored.items():
+        if state.get(key) != value:
+            state[key] = value
+    # An unconfirmed draft may outlive the confirmation widget, but cannot
+    # invalidate the already-locked trip or block completing/cancelling it.
+    state.pop(prefix + '::cargo_draft', None)
+    return True
+
+
 def settings(st, prefix, capacity, locked, rerun):
     order_key = prefix + '::cargo_order'
     ready_key = prefix + '::cargo_ready'
@@ -68,7 +109,22 @@ def settings(st, prefix, capacity, locked, rerun):
     if not enabled:
         return None, True
     ready = st.session_state.get(ready_key, False)
-    current = st.session_state.get(order_key, [])
+    raw_current = st.session_state.get(order_key, [])
+    try:
+        current = validate(raw_current, capacity)
+    except ValueError:
+        current = []
+        ready = False
+        st.session_state[ready_key] = False
+    # A genuinely empty truck has no loading sequence to confirm. Do not
+    # auto-confirm a nonempty draft or a stale nonempty saved order.
+    if (not locked and not ready and isinstance(raw_current, (list, tuple))
+            and not raw_current and not st.session_state.get(prefix + '::cargo_draft')
+            and st.session_state.get(prefix + '::truck_bike', 0) == 0
+            and st.session_state.get(prefix + '::truck_ebike', 0) == 0):
+        st.session_state[order_key] = []
+        st.session_state[ready_key] = True
+        ready = True
     with st.expander('車上排列設定' + ('（請確認）' if not ready else ''), expanded=not ready):
         if locked:
             st.write(label(current))
@@ -86,7 +142,7 @@ def settings(st, prefix, capacity, locked, rerun):
                     st.session_state[prefix + '::truck_bike'] = current.count('bike')
                     st.session_state[prefix + '::truck_ebike'] = current.count('ebike')
                     rerun()
-    return list(current), ready and st.session_state.get(prefix + "::cargo_draft", current) == current
+    return list(current), bool(ready and (locked or st.session_state.get(prefix + "::cargo_draft", current) == current))
 
 
 def rerun_fragment(st):
