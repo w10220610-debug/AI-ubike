@@ -149,7 +149,10 @@ class CargoUITests(unittest.TestCase):
 
     def test_unconfirmed_nonempty_draft_is_not_autoconfirmed(self):
         ui = FakeUI(True)
-        ui.session_state['test::cargo_draft'] = ['bike']
+        ui.session_state.update({
+            'test::cargo_was_enabled': True,
+            'test::cargo_draft': ['bike'],
+        })
         self.assertEqual(self.settings(ui), ([], False))
 
     def test_locked_snapshot_restores_confirmed_order_and_counts(self):
