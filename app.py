@@ -4569,6 +4569,12 @@ st.set_page_config(
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
 
+**2026/11/03｜智慧調度場站卡片精簡與裝車圖示**
+- 以 🍌 一般車（2.0）、🍊 電車（2.0E）搭配文字區分車種，保留實際車種編號以免誤判。
+- 將上車建議直接放入場站卡片「本站作業」下方；相鄰同車種合併顯示，穿插順序不會錯誤合併，完成後排列按需展開。
+- 移除卡片中「路網距離、行車時間、預估總時間、綜合效益」四格顯示，不變更道路計算與推薦權重，也不增加額外網路請求。
+- 維持原本選用車上排列調度開關，以及鎖定行程後調整實際上車順序功能。
+
 **2026/11/01｜選用車上排列調度**
 - 智慧調度新增預設關閉的「依車上排列調度」，單列由車頭記錄至車尾；未勾選維持原本推薦。
 - 按鈕設定車種／交換位置，確認後自動統計數量；只推薦能從車尾依序卸下的車輛。
@@ -5596,7 +5602,6 @@ st.markdown(
         background:linear-gradient(135deg, rgba(8,21,38,.94), rgba(28,8,38,.88));
         box-shadow:0 9px 22px rgba(0,0,0,.22);
     }
-    .stApp .dispatch-plan-grid div,
     .stApp .dispatch-truck-compare,
     .stApp .dispatch-truck-row,
     .stApp .dispatch-truck-status-grid div {
@@ -10852,18 +10857,66 @@ def _dispatch_truck_before_counts(plan: dict) -> tuple[int, int]:
     return max(0, int(before_bike)), max(0, int(before_ebike))
 
 
+
+def _dispatch_cargo_chips(order) -> str:
+    """Show adjacent vehicle runs without losing the original loading order."""
+    if not isinstance(order, (tuple, list)) or any(
+        kind not in ("bike", "ebike") for kind in order
+    ):
+        return '<span class="dispatch-cargo-empty">排列資料待確認</span>'
+    if not order:
+        return '<span class="dispatch-cargo-empty">本次不上車</span>'
+    groups = []
+    for kind in order:
+        if groups and groups[-1][0] == kind:
+            groups[-1][1] += 1
+        else:
+            groups.append([kind, 1])
+    chips = []
+    for kind, count in groups:
+        icon, label, css_kind = (
+            ("🍌", "一般車 2.0", "bike") if kind == "bike"
+            else ("🍊", "電車 2.0E", "ebike")
+        )
+        chips.append(
+            f'<span class="dispatch-cargo-chip dispatch-cargo-{css_kind}">'
+            f'<span aria-hidden="true">{icon}</span> {label} ×{count}</span>'
+        )
+    return '<span class="dispatch-cargo-arrow" aria-hidden="true">→</span>'.join(chips)
+
+
 def render_dispatch_plan_card(plan: dict, *, title: str) -> None:
     """呈現單一推薦場站，並用作業前後對照快速確認貨車載量。"""
     station_name = str(plan.get("station_name") or "").strip()
     station_name_attr = html.escape(station_name, quote=True)
     st.markdown(work_order_badge(status_cache, station_name), unsafe_allow_html=True)
+    cargo_panel_html = ""
     if "cargo_after" in plan:
-        st.caption("依車尾順序下車，然後按以下順序上車")
-        pickup_text = " → ".join("一般車" if x == "bike" else "電車" for x in plan["cargo_pickup"])
-        st.write("上車先後：" + (pickup_text or "本次不上車"))
-        st.write("完成後：" + cargo_label(plan["cargo_after"]))
-        if plan.get("cargo_hint"):
-            st.caption(f"依現有缺口，此排列方便在 {plan['cargo_hint']} 卸車；僅為裝車參考，正式下一站於完成後依道路與優先場站重算。")
+        pickup = plan.get("cargo_pickup")
+        after = plan.get("cargo_after")
+        pickup_chips = _dispatch_cargo_chips(pickup)
+        after_chips = _dispatch_cargo_chips(after)
+        hint = str(plan.get("cargo_hint") or "").strip()
+        hint_line = (
+            '<div class="dispatch-cargo-hint">此排列方便在 '
+            + html.escape(hint) +
+            ' 卸車；下一站仍依道路與優先場站重新計算。</div>'
+        ) if hint else ""
+        cargo_panel_html = f"""
+          <div class="dispatch-cargo-panel">
+            <div class="dispatch-cargo-heading">建議上車順序 <small>從車頭往車尾裝</small></div>
+            <div class="dispatch-cargo-chips">{pickup_chips}</div>
+            <div class="dispatch-cargo-caption">依車尾順序下車；需要穿插排列，可在下方調整本次上車順序。</div>
+            <details class="dispatch-cargo-details">
+              <summary>查看完成後車上排列</summary>
+              <div class="dispatch-cargo-complete">
+                <span>車頭</span><div class="dispatch-cargo-chips">{after_chips}</div>
+                <span>車尾（先卸）</span>
+              </div>
+              {hint_line}
+            </details>
+          </div>
+        """
     before_bike, before_ebike = _dispatch_truck_before_counts(plan)
     after_bike = safe_nonnegative_int(plan.get("truck_after_bike"))
     after_ebike = safe_nonnegative_int(plan.get("truck_after_ebike"))
@@ -10906,13 +10959,6 @@ def render_dispatch_plan_card(plan: dict, *, title: str) -> None:
             <div class="dispatch-plan-badge">可調度 <strong>{safe_nonnegative_int(plan['dispatch_count'])}</strong> 台</div>
           </div>
 
-          <div class="dispatch-plan-grid">
-            <div><span>路網距離</span><strong>{float(plan['estimated_distance_km']):.1f} km</strong></div>
-            <div><span>行車時間</span><strong>{float(plan['estimated_drive_minutes']):.0f} 分</strong></div>
-            <div><span>預估總時間</span><strong>{float(plan['estimated_total_minutes']):.0f} 分</strong></div>
-            <div><span>綜合效益</span><strong>{float(plan['score']):.2f}</strong><small>台／分</small></div>
-          </div>
-
           <div class="dispatch-plan-action-label">場站現況／標準</div>
           <div class="dispatch-plan-action">
             2.0：{html.escape(vehicle_balance_text(plan.get('current_bike'), plan.get('standard_bike')))}<br>
@@ -10921,6 +10967,7 @@ def render_dispatch_plan_card(plan: dict, *, title: str) -> None:
           </div>
           <div class="dispatch-plan-action-label">本站作業</div>
           <div class="dispatch-plan-action">{html.escape(dispatch_action_text(plan))}</div>
+          {cargo_panel_html}
 
           <div class="dispatch-truck-compare">
             <div class="dispatch-truck-row dispatch-truck-before">
@@ -11085,13 +11132,22 @@ def render_smart_dispatch(
         .dispatch-plan-region {font-size:.8rem; opacity:.7; margin-top:.25rem;}
         .dispatch-plan-badge {flex:0 0 auto; padding:.42rem .62rem; border-radius:999px; background:rgba(22,119,255,.12); color:#0b63ce; font-size:.72rem; font-weight:750; white-space:nowrap;}
         .dispatch-plan-badge strong {font-size:1.02rem;}
-        .dispatch-plan-grid {display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.42rem; margin-top:.78rem;}
-        .dispatch-plan-grid div {padding:.58rem .38rem; border-radius:12px; background:rgba(255,255,255,.76); text-align:center; min-width:0;}
-        .dispatch-plan-grid span {display:block; font-size:.66rem; opacity:.66; white-space:nowrap;}
-        .dispatch-plan-grid strong {display:inline-block; font-size:.98rem; margin-top:.16rem;}
-        .dispatch-plan-grid small {font-size:.62rem; margin-left:.12rem; opacity:.7;}
         .dispatch-plan-action-label {margin-top:.68rem; font-size:.67rem; font-weight:800; opacity:.66;}
         .dispatch-plan-action {margin-top:.22rem; padding:.72rem .78rem; border-radius:12px; font-size:1.02rem; font-weight:900; background:rgba(22,119,255,.12);}
+        .dispatch-cargo-panel {margin-top:.42rem; padding:.56rem .64rem; border-radius:12px; border:1px solid rgba(148,163,184,.18); background:rgba(85,246,255,.055);}
+        .dispatch-cargo-heading {font-size:.78rem; font-weight:850; margin-bottom:.38rem;}
+        .dispatch-cargo-heading small {font-size:.63rem; font-weight:500; opacity:.68; margin-left:.3rem;}
+        .dispatch-cargo-chips {display:flex; align-items:center; flex-wrap:wrap; gap:.26rem; min-width:0;}
+        .dispatch-cargo-chip {display:inline-flex; align-items:center; gap:.18rem; border-radius:10px; padding:.3rem .48rem; font-weight:800; font-size:.77rem; white-space:nowrap;}
+        .dispatch-cargo-bike {background:rgba(247,211,74,.20); border:1px solid rgba(247,211,74,.3);}
+        .dispatch-cargo-ebike {background:rgba(255,149,63,.19); border:1px solid rgba(255,149,63,.3);}
+        .dispatch-cargo-arrow {font-size:.7rem; opacity:.65;}
+        .dispatch-cargo-caption,.dispatch-cargo-hint {font-size:.68rem; line-height:1.45; opacity:.72; margin-top:.36rem;}
+        .dispatch-cargo-details {margin-top:.34rem; font-size:.72rem;}
+        .dispatch-cargo-details summary {cursor:pointer; font-weight:700; padding:.22rem 0; touch-action:manipulation;}
+        .dispatch-cargo-complete {display:flex; align-items:center; flex-wrap:wrap; gap:.28rem; margin-top:.4rem;}
+        .dispatch-cargo-complete > span {font-size:.66rem; opacity:.75;}
+        .dispatch-cargo-empty {font-size:.75rem; opacity:.8;}
         .dispatch-truck-compare {margin-top:.58rem; padding:.55rem; border-radius:14px; background:rgba(255,255,255,.56);}
         .dispatch-truck-row {display:grid; grid-template-columns:6.2rem 1fr auto; gap:.45rem; align-items:center; padding:.44rem .5rem; border-radius:10px;}
         .dispatch-truck-row span {font-size:.72rem; font-weight:800; opacity:.68;}
@@ -11135,7 +11191,6 @@ def render_smart_dispatch(
         @media (max-width: 700px) {
           .dispatch-plan-card {padding:.82rem; border-radius:18px;}
           .dispatch-plan-title {font-size:1.42rem;}
-          .dispatch-plan-grid {grid-template-columns:repeat(2,minmax(0,1fr));}
           .dispatch-truck-row {grid-template-columns:5.7rem 1fr; gap:.2rem .4rem;}
           .dispatch-truck-row small {grid-column:2; white-space:normal;}
           .dispatch-truck-status {padding:.65rem;}
