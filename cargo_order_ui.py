@@ -30,10 +30,10 @@ def editor(st, key, initial, capacity, rerun, *, disabled=False):
     {selector} [data-testid="stCaptionContainer"] p {{font-size:12px !important; margin:0 !important;}}
     </style>''', unsafe_allow_html=True)
     with st.container(key=container_key):
-        st.caption(f'車頭 ↓ 車尾先卸 · 一般 {order.count("bike")}／電 {order.count("ebike")} · {len(order)}/{capacity}')
+        st.caption(f'車頭 ↓ 車尾先卸 · 🍌一般 {order.count("bike")}／🍊電車 {order.count("ebike")} · {len(order)}/{capacity}')
         for i, kind in enumerate(order):
             cols = st.columns([3, 1, 1])
-            if cols[0].button(f'{i + 1:02d}　' + ('一般車' if kind == 'bike' else '電車') + (' · 車頭' if i == 0 else '') + (' · 車尾' if i == len(order) - 1 else ''), key=f'{key}:type:{i}', disabled=disabled):
+            if cols[0].button(f'{i + 1:02d}　' + ('🍌 一般車' if kind == 'bike' else '🍊 電車') + (' · 車頭' if i == 0 else '') + (' · 車尾' if i == len(order) - 1 else ''), key=f'{key}:type:{i}', disabled=disabled):
                 order[i] = 'ebike' if kind == 'bike' else 'bike'
                 st.session_state[key] = order
                 rerun()
@@ -45,7 +45,7 @@ def editor(st, key, initial, capacity, rerun, *, disabled=False):
                     rerun()
         with st.container(key=container_key + "_actions"):
             cols = st.columns(3)
-            for col, kind, title in ((cols[0], 'bike', '＋一般'), (cols[1], 'ebike', '＋電車')):
+            for col, kind, title in ((cols[0], 'bike', '＋🍌 一般'), (cols[1], 'ebike', '＋🍊 電車')):
                 if col.button(title, key=f'{key}:add:{kind}', disabled=disabled or len(order) >= capacity):
                     st.session_state[key] = order + [kind]
                     rerun()
