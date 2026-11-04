@@ -5632,6 +5632,7 @@ DISPATCH_OPERATION_MINUTES_PER_BIKE = 0.75
 ROAD_ROUTER_BASE_URL = os.getenv("OSRM_BASE_URL", "https://router.project-osrm.org").rstrip("/")
 ROAD_ROUTER_PROFILE = os.getenv("OSRM_PROFILE", "driving").strip() or "driving"
 ROAD_ROUTER_TIMEOUT_SECONDS = 12
+ROAD_ROUTER_FAILURE_COOLDOWN_SECONDS = 45  # 當路網服務無法使用時，避免每批與每次重新執行重試。
 ROAD_ROUTER_MAX_ATTEMPTS = 2
 ROAD_ROUTER_BATCH_SIZE = 36
 ROAD_ROUTER_CACHE_TTL_SECONDS = 300
@@ -9758,6 +9759,20 @@ def fetch_road_table_cached(
 ROAD_PAIR_CACHE_STATE_KEY = "road_pair_metric_cache::v24.1"
 ROAD_PAIR_CACHE_CLEANUP_STATE_KEY = "road_pair_metric_cache_cleanup::v26.3"
 ROAD_ROUTER_STATUS_STATE_KEY = "road_router_status::v24.1"
+
+
+def _road_router_failure_cooldown_active() -> bool:
+    """路網失敗時短暫停止重複請求；成功快取結果仍可照常使用。"""
+    status = st.session_state.get(ROAD_ROUTER_STATUS_STATE_KEY)
+    if not isinstance(status, dict) or status.get("ok") is not False:
+        return False
+    try:
+        failed_at = float(status.get("updated_at") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    elapsed = time.time() - failed_at
+    return 0.0 <= elapsed < ROAD_ROUTER_FAILURE_COOLDOWN_SECONDS
+
 ROAD_PAIR_CACHE_MAX_AGE_SECONDS = 1800
 ROAD_PAIR_CACHE_MAX_ENTRIES = 5000
 ROAD_PAIR_CACHE_CLEANUP_INTERVAL_SECONDS = 30
@@ -9908,6 +9923,8 @@ def road_metrics_from_origin(
         ]
         coordinates = tuple([rounded_origin, *rounded_destinations])
         try:
+            if _road_router_failure_cooldown_active():
+                raise RoadRoutingError("道路服務短暫冷卻中，稍後自動重試")
             matrix = fetch_road_table_cached(
                 coordinates,
                 (0,),
@@ -9959,11 +9976,13 @@ def road_metrics_from_origin(
                     metric=metric,
                 )
         except RoadRoutingError as exc:
-            st.session_state[ROAD_ROUTER_STATUS_STATE_KEY] = {
-                "ok": False,
-                "updated_at": time.time(),
-                "message": str(exc),
-            }
+            # 冷卻期間不刷新失敗時間，確保逾時後一定有機會重新連線。
+            if not _road_router_failure_cooldown_active():
+                st.session_state[ROAD_ROUTER_STATUS_STATE_KEY] = {
+                    "ok": False,
+                    "updated_at": time.time(),
+                    "message": str(exc),
+                }
             for station_name, destination_latitude, destination_longitude in batch:
                 output[station_name] = {
                     "straight_distance_km": haversine_distance_km(
@@ -10018,7 +10037,9 @@ def attach_analysis_road_metrics(
         origin_longitude=origin_longitude,
         destinations=destinations,
     )
-    valid_count = 0
+    # 一次映射整張場站表，避免對每一個道路結果反覆掃描整個 DataFrame。
+    road_distances: dict[str, float] = {}
+    drive_times: dict[str, float] = {}
     for station_name, metric in road_metrics.items():
         if not isinstance(metric, dict) or metric.get("road_route_available") is False:
             continue
@@ -10026,10 +10047,17 @@ def attach_analysis_road_metrics(
         drive_minutes = metric.get("drive_minutes")
         if distance is None or drive_minutes is None:
             continue
-        station_mask = enriched["場站名稱"].astype(str).eq(str(station_name))
-        enriched.loc[station_mask, "距離目前位置 (km)"] = float(distance)
-        enriched.loc[station_mask, "預估行車時間 (分)"] = float(drive_minutes)
-        valid_count += int(station_mask.sum())
+        key = str(station_name)
+        road_distances[key] = float(distance)
+        drive_times[key] = float(drive_minutes)
+    station_names = enriched["場站名稱"].astype(str)
+    mapped_distances = station_names.map(road_distances)
+    mapped_times = station_names.map(drive_times)
+    valid_mask = mapped_distances.notna() & mapped_times.notna()
+    valid_count = int(valid_mask.sum())
+    if valid_count:
+        enriched.loc[valid_mask, "距離目前位置 (km)"] = mapped_distances.loc[valid_mask]
+        enriched.loc[valid_mask, "預估行車時間 (分)"] = mapped_times.loc[valid_mask]
 
     if valid_count <= 0:
         return enriched, False, "道路路網目前沒有回傳可用路線，已保留原始分析順序。"
@@ -10244,6 +10272,8 @@ def road_metrics_to_endpoint(
         coordinates = tuple([*origins, endpoint])
         endpoint_index = len(coordinates) - 1
         try:
+            if _road_router_failure_cooldown_active():
+                raise RoadRoutingError("道路服務短暫冷卻中，稍後自動重試")
             matrix = fetch_road_table_cached(
                 coordinates,
                 tuple(range(len(batch))),
@@ -10279,11 +10309,13 @@ def road_metrics_to_endpoint(
                     metric=metric,
                 )
         except RoadRoutingError as exc:
-            st.session_state[ROAD_ROUTER_STATUS_STATE_KEY] = {
-                "ok": False,
-                "updated_at": time.time(),
-                "message": str(exc),
-            }
+            # 冷卻期間不刷新失敗時間，確保逾時後一定有機會重新連線。
+            if not _road_router_failure_cooldown_active():
+                st.session_state[ROAD_ROUTER_STATUS_STATE_KEY] = {
+                    "ok": False,
+                    "updated_at": time.time(),
+                    "message": str(exc),
+                }
             for candidate in batch:
                 output[str(candidate["station_name"])] = {
                     "road_route_available": False,
