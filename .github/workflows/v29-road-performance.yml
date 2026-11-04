@@ -1,0 +1,28 @@
+name: V29 Road Performance Regression
+
+on:
+  pull_request:
+    branches: [v29-old-ui]
+    paths:
+      - 'app.py'
+      - 'tests/test_road_performance.py'
+      - '.github/workflows/v29-road-performance.yml'
+  push:
+    branches: [feature-v29-safe-perf-20261104, v29-old-ui]
+    paths:
+      - 'app.py'
+      - 'tests/test_road_performance.py'
+      - '.github/workflows/v29-road-performance.yml'
+
+jobs:
+  road-performance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'pandas>=2.2,<3' 'numpy>=1.26,<3' pytest
+      - run: python -m py_compile app.py
+      - run: PYTHONPATH=. python -m pytest tests/test_road_performance.py -q
