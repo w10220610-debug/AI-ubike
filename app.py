@@ -4,9 +4,63 @@
 
 from __future__ import annotations
 
-from cargo_order import (order_context, scoped_order, tail_unload, plan_unload as plan_cargo_unload,
+from cargo_order import (order_context, scoped_order, tail_unload,
                          complete as complete_cargo, loading_order, choose_loading,
                          label as cargo_label, validate as validate_cargo)
+
+# The app and its helper module can briefly come from different deployments.
+# Keep V29 bootable even if an older cargo_order.py has no plan_unload yet.
+try:
+    from cargo_order import plan_unload as plan_cargo_unload
+except ImportError:
+    def plan_cargo_unload(order, bike, ebike, max_temporary=3):
+        """Compatibility implementation: reach the fourth bike by moving three."""
+        remaining = validate_cargo(order)
+        needs = {"bike": int(bike), "ebike": int(ebike)}
+        if any(value < 0 for value in needs.values()):
+            raise ValueError("下車數量不可為負數")
+        unloaded = {"bike": 0, "ebike": 0}
+        temporary = []
+        handling_moves = 0
+        max_held = 0
+        max_temporary = max(0, int(max_temporary))
+        while remaining and any(needs.values()):
+            tail_kind = remaining[-1]
+            if needs[tail_kind] > 0:
+                remaining.pop()
+                needs[tail_kind] -= 1
+                unloaded[tail_kind] += 1
+                continue
+            available = max_temporary - len(temporary)
+            if available <= 0:
+                break
+            reachable = remaining[-(available + 1):]
+            if not any(needs[kind] > 0 for kind in reachable):
+                break
+            temporary.append(remaining.pop())
+            handling_moves += 1
+            max_held = max(max_held, len(temporary))
+        while temporary:
+            remaining.append(temporary.pop())
+            handling_moves += 1
+        return remaining, unloaded, handling_moves, max_held
+
+    def complete_cargo(order, unload_bike, unload_ebike, pickup_order, capacity):
+        """Respect actual on-site counts even when the recorded tail differs."""
+        requested = {"bike": int(unload_bike), "ebike": int(unload_ebike)}
+        remaining, unloaded, _, _ = plan_cargo_unload(
+            order, requested["bike"], requested["ebike"]
+        )
+        missing = {kind: requested[kind] - unloaded[kind] for kind in requested}
+        if any(missing.values()):
+            for index in range(len(remaining) - 1, -1, -1):
+                kind = remaining[index]
+                if missing[kind] > 0:
+                    remaining.pop(index)
+                    missing[kind] -= 1
+            if any(missing.values()):
+                raise ValueError("實際下車數量超過車上現有車輛，請確認下車數量")
+        return validate_cargo(remaining + validate_cargo(pickup_order), capacity)
 from cargo_order_ui import settings as cargo_settings, editor as cargo_editor, rerun_fragment as cargo_rerun
 
 
