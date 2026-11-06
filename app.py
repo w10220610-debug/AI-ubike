@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
-from cargo_order import (order_context, scoped_order, tail_unload, complete as complete_cargo,
-                         loading_order, choose_loading, label as cargo_label, validate as validate_cargo)
+from cargo_order import (order_context, scoped_order, tail_unload, plan_unload as plan_cargo_unload,
+                         complete as complete_cargo, loading_order, choose_loading,
+                         label as cargo_label, validate as validate_cargo)
 from cargo_order_ui import settings as cargo_settings, editor as cargo_editor, rerun_fragment as cargo_rerun
 
 
@@ -4569,6 +4570,11 @@ st.set_page_config(
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
 
+**2026/11/06｜車尾暫移 3 台卸車與現場作業彈性**
+- 開啟「依車上排列調度」後，可暫時移開最多 3 台車，卸下從車尾往內第 4 台；本站連續卸車會共用暫移作業，避免重複搬車。
+- 場站推薦納入暫移搬出／搬回的作業時間，兼顧場站缺口、道路時間與裝卸成本；不增加外部資料查詢。
+- 完成本站依實際下車數量更新車上排列，必要時允許現場調整超出原推薦順序；保留車種數量、上車排列、最高載量與場站存量驗證。
+
 **2026/11/03｜智慧調度場站卡片精簡與裝車圖示**
 - 以 🍌 一般車（2.0）、🍊 電車（2.0E）搭配文字區分車種，保留實際車種編號以免誤判。
 - 將上車建議直接放入場站卡片「本站作業」下方；相鄰同車種合併顯示，穿插順序不會錯誤合併，完成後排列按需展開。
@@ -4700,6 +4706,10 @@ _UPDATE_CONTENT_MD = f"""
 _BUG_FIX_CONTENT_MD = """
 #### 🐞 BUG 修復紀錄
 > 僅記錄已實際完成的修復；單純新增功能不列入。
+
+**2026/11/06｜現場修改下車數量遭車尾順序阻擋**
+- 修正完成本站沿用舊版嚴格車尾卸車檢查，造成實際已卸車卻無法確認；改以實際數量完成，並推估保留車輛的排列。
+- 超過車上現有數量、超載及與本次上車順序數量不符時，仍明確提示修正；BUG 修復不計功能升版。
 
 **2026/11/06｜確認目前排列後仍卡在確認提示**
 - 確認時同步更新本次調度讀取的確認狀態與車種數量，直接完成本次畫面，不再於載量設定繪製前額外重跑。
@@ -10363,10 +10373,14 @@ def build_dispatch_plan_for_station(
     unload_ebike = min(ebike_shortage, truck_ebike)
     cargo = order_context.get()
     remaining = None
+    cargo_moves = 0
+    cargo_max_held = 0
     if cargo is not None:
         if cargo.count("bike") != truck_bike or cargo.count("ebike") != truck_ebike:
             return None  # Never silently plan against stale or simulated counts.
-        remaining, down = tail_unload(cargo, bike_shortage, ebike_shortage)
+        remaining, down, cargo_moves, cargo_max_held = plan_cargo_unload(
+            cargo, bike_shortage, ebike_shortage
+        )
         unload_bike, unload_ebike = down["bike"], down["ebike"]
     bike_after_unload = truck_bike - unload_bike
     ebike_after_unload = truck_ebike - unload_ebike
@@ -10395,7 +10409,9 @@ def build_dispatch_plan_for_station(
         pickup_order, hint = choose_loading(remaining, pickup_bike, pickup_ebike,
                                             cargo_rows, row.get("場站名稱"))
         cargo_fields = {"cargo_before": list(cargo), "cargo_pickup": pickup_order,
-                        "cargo_after": remaining + pickup_order, "cargo_hint": hint}
+                        "cargo_after": remaining + pickup_order, "cargo_hint": hint,
+                        "cargo_handling_moves": cargo_moves,
+                        "cargo_max_temporary": cargo_max_held}
     final_bike = bike_after_unload + pickup_bike
     final_ebike = ebike_after_unload + pickup_ebike
     if final_bike + final_ebike > max_capacity:
@@ -10524,7 +10540,8 @@ def calculate_dispatch_candidates(
 
         estimated_operation_minutes = (
             DISPATCH_OPERATION_BASE_MINUTES
-            + plan["dispatch_count"] * DISPATCH_OPERATION_MINUTES_PER_BIKE
+            + (plan["dispatch_count"] + safe_nonnegative_int(plan.get("cargo_handling_moves")))
+              * DISPATCH_OPERATION_MINUTES_PER_BIKE
         )
         estimated_total_minutes = estimated_drive_minutes + estimated_operation_minutes
         raw_efficiency = plan["dispatch_count"] / max(1.0, estimated_total_minutes)
@@ -10670,7 +10687,11 @@ def inspect_dispatch_station(
     if distance <= 0 or drive_minutes <= 0:
         base["reason"] = "道路距離／行車時間資料不完整。"
         return base
-    operation_minutes = DISPATCH_OPERATION_BASE_MINUTES + plan["dispatch_count"] * DISPATCH_OPERATION_MINUTES_PER_BIKE
+    operation_minutes = (
+        DISPATCH_OPERATION_BASE_MINUTES
+        + (plan["dispatch_count"] + safe_nonnegative_int(plan.get("cargo_handling_moves")))
+          * DISPATCH_OPERATION_MINUTES_PER_BIKE
+    )
     total_minutes = drive_minutes + operation_minutes
     plan.update(base)
     plan.update(
@@ -10933,6 +10954,15 @@ def render_dispatch_plan_card(plan: dict, *, title: str) -> None:
         pickup_chips = _dispatch_cargo_chips(pickup)
         after_chips = _dispatch_cargo_chips(after)
         hint = str(plan.get("cargo_hint") or "").strip()
+        temporarily_moved = safe_nonnegative_int(plan.get("cargo_max_temporary"))
+        handling_moves = safe_nonnegative_int(plan.get("cargo_handling_moves"))
+        unload_count = safe_nonnegative_int(plan.get("unload_bike")) + safe_nonnegative_int(plan.get("unload_ebike"))
+        unloading_line = (
+            '<div class="dispatch-cargo-caption">'
+            + (f'本站預估暫移 {temporarily_moved} 台，搬出／搬回共 {handling_moves} 次。'
+               if temporarily_moved else '本站預估可直接從車尾卸車。')
+            + '</div>'
+        ) if unload_count else ""
         hint_line = (
             '<div class="dispatch-cargo-hint">此排列方便在 '
             + html.escape(hint) +
@@ -10942,7 +10972,8 @@ def render_dispatch_plan_card(plan: dict, *, title: str) -> None:
           <div class="dispatch-cargo-panel">
             <div class="dispatch-cargo-heading">建議上車順序 <small>從車頭往車尾裝</small></div>
             <div class="dispatch-cargo-chips">{pickup_chips}</div>
-            <div class="dispatch-cargo-caption">依車尾順序下車；需要穿插排列，可在下方調整本次上車順序。</div>
+            <div class="dispatch-cargo-caption">車尾最多可暫移 3 台、取得第 4 台；現場實際下車數量可以自行修改。</div>
+            {unloading_line}
             <details class="dispatch-cargo-details">
               <summary>查看完成後車上排列</summary>
               <div class="dispatch-cargo-complete">
@@ -11618,6 +11649,7 @@ def render_smart_dispatch(
                     cargo_rerun(st)
                 actual_cargo_pickup = cargo_editor(st, pickup_key, active_trip["cargo_pickup"], max_capacity, lambda: cargo_rerun(st))
                 st.caption("只調整本次新上車的車輛。若實際上車數量有變，也請同步修改下方實際數量。")
+            st.caption("現場下車數量可自行修正；暫移 3 台是推薦條件，不是完成本站的限制。若現場重排車輛，請於下一站前重新確認車上排列。")
         with st.expander("現場變數／修改實際上下車數量", expanded=True):
             with st.form(key=f"{dispatch_prefix}::complete_trip_form::{trip_id}", clear_on_submit=False):
                 action_col_1, action_col_2 = st.columns(2)
