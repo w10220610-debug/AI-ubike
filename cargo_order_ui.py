@@ -30,7 +30,7 @@ def editor(st, key, initial, capacity, rerun, *, disabled=False):
     {selector} [data-testid="stCaptionContainer"] p {{font-size:12px !important; margin:0 !important;}}
     </style>''', unsafe_allow_html=True)
     with st.container(key=container_key):
-        st.caption(f'車頭 ↓ 車尾先卸 · 🍌一般 {order.count("bike")}／🍊電車 {order.count("ebike")} · {len(order)}/{capacity}')
+        st.caption(f'車頭 ↓ 車尾（可暫移最多 3 台） · 🍌一般 {order.count("bike")}／🍊電車 {order.count("ebike")} · {len(order)}/{capacity}')
         for i, kind in enumerate(order):
             cols = st.columns([3, 1, 1])
             if cols[0].button(f'{i + 1:02d}　' + ('🍌 一般車' if kind == 'bike' else '🍊 電車') + (' · 車頭' if i == 0 else '') + (' · 車尾' if i == len(order) - 1 else ''), key=f'{key}:type:{i}', disabled=disabled):
@@ -101,7 +101,7 @@ def settings(st, prefix, capacity, locked, rerun):
     ready_key = prefix + '::cargo_ready'
     previous_key = prefix + '::cargo_was_enabled'
     enabled = st.checkbox('依車上排列調度', key=prefix + '::cargo_enabled', disabled=locked,
-                          help='單列、只從車尾卸車；關閉時使用原本智慧調度。')
+                          help='單列排列，推薦時可暫移車尾 3 台取得第 4 台；關閉時使用原本智慧調度。')
     if enabled != st.session_state.get(previous_key, False):
         st.session_state[ready_key] = False
         st.session_state.pop(prefix + '::cargo_draft', None)
