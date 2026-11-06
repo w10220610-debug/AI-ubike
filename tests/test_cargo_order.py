@@ -5,8 +5,8 @@ import itertools
 from pathlib import Path
 import unittest
 import pandas as pd
-from cargo_order import (tail_unload, complete, loading_order, choose_loading,
-                         order_context, scoped_order)
+from cargo_order import (tail_unload, plan_unload, complete, loading_order,
+                         choose_loading, order_context, scoped_order)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -15,7 +15,8 @@ def load_plan():
     tree = ast.parse((ROOT / 'app.py').read_text())
     node = next(x for x in tree.body if isinstance(x, ast.FunctionDef) and x.name == 'build_dispatch_plan_for_station')
     env = dict(pd=pd, order_context=order_context, tail_unload=tail_unload,
-               choose_loading=choose_loading, status_cache={},
+               plan_cargo_unload=plan_unload, choose_loading=choose_loading,
+               status_cache={},
                normalize_current_status=lambda x: None if x is None else int(x),
                safe_nonnegative_int=lambda x: max(0, int(x or 0)),
                work_order_pending=lambda *args: False,
@@ -86,9 +87,12 @@ class CargoTests(unittest.TestCase):
         self.assertEqual(p['unload_ebike'], 3)
         self.assertNotIn('cargo_before', p)
 
-    def test_blocked_electric_not_recommended(self):
+    def test_electric_recommended_behind_two_tail_bikes(self):
         order_context.set(['ebike']*3 + ['bike']*2)
-        self.assertIsNone(self.plan_for(row(bs=0)))
+        plan = self.plan_for(row(bs=0))
+        self.assertEqual(plan['unload_ebike'], 3)
+        self.assertEqual(plan['cargo_max_temporary'], 2)
+        self.assertEqual(plan['cargo_handling_moves'], 4)
 
     def test_mixed_station_unloads_in_tail_order(self):
         order_context.set(['ebike']*3 + ['bike']*2)
@@ -96,10 +100,12 @@ class CargoTests(unittest.TestCase):
         self.assertEqual((p['unload_bike'], p['unload_ebike']), (2, 3))
         self.assertEqual(p['cargo_after'], [])
 
-    def test_partial_unload_stops_at_first_blocker(self):
+    def test_mixed_unload_moves_one_remaining_blocker(self):
         order_context.set(['ebike']*3 + ['bike']*2)
         p = self.plan_for(row(bs=1))
-        self.assertEqual((p['unload_bike'], p['unload_ebike']), (1, 0))
+        self.assertEqual((p['unload_bike'], p['unload_ebike']), (1, 3))
+        self.assertEqual(p['cargo_after'], ['bike'])
+        self.assertEqual(p['cargo_max_temporary'], 1)
 
     def test_stale_counts_fail_closed(self):
         order_context.set(['bike'])
@@ -114,9 +120,40 @@ class CargoTests(unittest.TestCase):
     def test_manual_interleave_preserved(self):
         self.assertEqual(complete(['bike'], 1, 0, ['bike','ebike','bike'], 14), ['bike','ebike','bike'])
 
-    def test_blocked_actual_completion_rejected(self):
-        with self.assertRaises(ValueError):
-            complete(['ebike', 'bike'], 0, 1, [], 14)
+    def test_actual_completion_can_override_recommendation_order(self):
+        self.assertEqual(complete(['ebike', 'bike'], 0, 1, [], 14), ['bike'])
+        self.assertEqual(
+            complete(['ebike'] + ['bike'] * 4, 0, 1, [], 14),
+            ['bike'] * 4,
+        )
+
+    def test_three_temporary_moves_reaches_fourth_bike(self):
+        remaining, down, moves, held = plan_unload(
+            ['ebike', 'bike', 'bike', 'bike'], 0, 1
+        )
+        self.assertEqual(remaining, ['bike'] * 3)
+        self.assertEqual(down, {'bike': 0, 'ebike': 1})
+        self.assertEqual((moves, held), (6, 3))
+
+    def test_fifth_from_tail_still_not_auto_recommended(self):
+        remaining, down, moves, held = plan_unload(
+            ['ebike'] + ['bike'] * 4, 0, 1
+        )
+        self.assertEqual(remaining, ['ebike'] + ['bike'] * 4)
+        self.assertEqual(down, {'bike': 0, 'ebike': 0})
+        self.assertEqual((moves, held), (0, 0))
+
+    def test_multiple_unloads_share_temporary_movements(self):
+        remaining, down, moves, held = plan_unload(
+            ['ebike', 'ebike', 'bike', 'bike', 'bike'], 0, 2
+        )
+        self.assertEqual(remaining, ['bike'] * 3)
+        self.assertEqual(down, {'bike': 0, 'ebike': 2})
+        self.assertEqual((moves, held), (6, 3))
+
+    def test_actual_completion_still_checks_inventory(self):
+        with self.assertRaisesRegex(ValueError, '超過車上現有'):
+            complete(['bike'], 0, 1, [], 14)
 
     def test_capacity_and_invalid_types(self):
         with self.assertRaises(ValueError):
@@ -145,11 +182,19 @@ class CargoTests(unittest.TestCase):
             for order in itertools.product(('bike','ebike'), repeat=size):
                 for b in range(4):
                     for e in range(4):
-                        remaining, down = tail_unload(order, b, e)
-                        n = down['bike'] + down['ebike']
-                        self.assertEqual(remaining, list(order[:size-n]))
+                        remaining, down, moves, held = plan_unload(order, b, e)
+                        self.assertEqual(
+                            tail_unload(order, b, e), (remaining, down)
+                        )
                         self.assertLessEqual(down['bike'], b)
                         self.assertLessEqual(down['ebike'], e)
+                        self.assertLessEqual(held, 3)
+                        self.assertEqual(moves, 2 * held)
+                        self.assertEqual(len(remaining), size - sum(down.values()))
+                        self.assertEqual(remaining.count('bike'), order.count('bike') - down['bike'])
+                        self.assertEqual(remaining.count('ebike'), order.count('ebike') - down['ebike'])
+                        original_iter = iter(order)
+                        self.assertTrue(all(kind in original_iter for kind in remaining))
                         self.assertEqual(complete(order, down['bike'], down['ebike'], [], 14), remaining)
 
 
