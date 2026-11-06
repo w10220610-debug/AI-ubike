@@ -25,21 +25,79 @@ def validate(order, capacity=100):
     return list(order)
 
 
-def tail_unload(order, bike, ebike):
+MAX_TEMPORARY_MOVES = 3
+
+
+def plan_unload(order, bike, ebike, max_temporary=MAX_TEMPORARY_MOVES):
+    """Estimate a station's unloads with at most three bikes temporarily aside.
+
+    The list is ordered cab-to-tail. A skipped bike is held in a temporary
+    LIFO stack; multiple requested bikes behind it can be unloaded together,
+    and the skipped bikes are restored in their original relative order.
+    Returns (truck_remaining, unloaded_by_type, handling_moves, max_held).
+    """
     remaining = validate(order)
     needs = {'bike': int(bike), 'ebike': int(ebike)}
+    if any(number < 0 for number in needs.values()):
+        raise ValueError('下車數量不可為負數')
+    max_temporary = max(0, int(max_temporary))
     unloaded = {'bike': 0, 'ebike': 0}
-    while remaining and needs[remaining[-1]] > 0:
-        kind = remaining.pop()
-        needs[kind] -= 1
-        unloaded[kind] += 1
+    temporary = []
+    handling_moves = 0
+    max_held = 0
+
+    while remaining and any(needs.values()):
+        tail = remaining[-1]
+        if needs[tail] > 0:
+            remaining.pop()
+            needs[tail] -= 1
+            unloaded[tail] += 1
+            continue
+
+        available = max_temporary - len(temporary)
+        if available <= 0:
+            break
+        # Never move a blocker without a requested vehicle within reach.
+        reachable = remaining[-(available + 1):]
+        if not any(needs[kind] > 0 for kind in reachable):
+            break
+        temporary.append(remaining.pop())
+        handling_moves += 1
+        max_held = max(max_held, len(temporary))
+
+    while temporary:
+        remaining.append(temporary.pop())
+        handling_moves += 1
+    return remaining, unloaded, handling_moves, max_held
+
+
+def tail_unload(order, bike, ebike):
+    """Recommend unloads reachable by moving at most three tail bikes."""
+    remaining, unloaded, _moves, _max_held = plan_unload(order, bike, ebike)
     return remaining, unloaded
 
 
 def complete(order, unload_bike, unload_ebike, pickup_order, capacity):
-    remaining, unloaded = tail_unload(order, unload_bike, unload_ebike)
-    if unloaded != {'bike': unload_bike, 'ebike': unload_ebike}:
-        raise ValueError('實際下車順序被車尾車輛擋住，請修正下車數量或車上排列')
+    """Commit actual site work without rejecting an edited unload sequence.
+
+    Station completion trusts the operator's actual counts, even if a vehicle
+    was beyond the recommended three temporary moves or manually rearranged.
+    Prefer the reachable unloading plan; for any remaining requested bikes,
+    remove the closest matching kind from the tail without reordering others.
+    """
+    requested = {'bike': int(unload_bike), 'ebike': int(unload_ebike)}
+    remaining, unloaded, _moves, _max_held = plan_unload(
+        order, requested['bike'], requested['ebike']
+    )
+    missing = {kind: requested[kind] - unloaded[kind] for kind in requested}
+    if any(missing.values()):
+        for index in range(len(remaining) - 1, -1, -1):
+            kind = remaining[index]
+            if missing[kind] > 0:
+                remaining.pop(index)
+                missing[kind] -= 1
+        if any(missing.values()):
+            raise ValueError('實際下車數量超過車上現有車輛，請確認下車數量')
     return validate(remaining + validate(pickup_order), capacity)
 
 
@@ -60,9 +118,9 @@ def choose_loading(remaining, bike, ebike, rows, station_name):
     Existing dispatch ranking remains authoritative after completion.
     """
     choices = [loading_order(bike, ebike, kind) for kind in ('ebike', 'bike')]
-    best, best_score, hint = choices[0], -1, ''
+    best, best_score, hint = choices[0], (-1, float('-inf')), ''
     for choice in choices:
-        score, name = 0, ''
+        score, name = (-1, float('-inf')), ''
         for row in rows:
             if row.get('場站名稱') == station_name:
                 continue
@@ -73,10 +131,10 @@ def choose_loading(remaining, bike, ebike, rows, station_name):
                 e = max(0, int(row['2.0E 標準']) - int(row['2.0E 現況']))
             except (ValueError, TypeError, KeyError, OverflowError):
                 continue
-            _, down = tail_unload(remaining + choice, b, e)
-            amount = sum(down.values())
-            if amount > score:
-                score, name = amount, str(row.get('場站名稱') or '')
+            _, down, moves, _ = plan_unload(remaining + choice, b, e)
+            candidate = (sum(down.values()), -moves)
+            if candidate > score:
+                score, name = candidate, str(row.get('場站名稱') or '')
         if score > best_score:
             best, best_score, hint = choice, score, name
     return best, hint
