@@ -141,7 +141,10 @@ def settings(st, prefix, capacity, locked, rerun):
                     st.session_state[ready_key] = True
                     st.session_state[prefix + '::truck_bike'] = current.count('bike')
                     st.session_state[prefix + '::truck_ebike'] = current.count('ebike')
-                    rerun()
+                    # Finish this render so the capacity/count widgets below
+                    # remain mounted and dispatch sees the new state at once.
+                    ready = True
+                    st.success(f'已確認車上排列：一般車 {current.count("bike")} 台、電車 {current.count("ebike")} 台，共 {len(current)} 台。')
     return list(current), bool(ready and (locked or st.session_state.get(prefix + "::cargo_draft", current) == current))
 
 

@@ -170,6 +170,7 @@ class FakeUI:
     def markdown(self, *a, **kw): pass
     def caption(self, *a): pass
     def write(self, *a): pass
+    def success(self, *a): pass
     def columns(self, widths): return [self] * (widths if isinstance(widths, int) else len(widths))
     def button(self, *a, key, disabled=False, **kw): return self.clicked == key and not disabled
 
@@ -251,9 +252,27 @@ class CargoUITests(unittest.TestCase):
         ui.session_state.update({'test::cargo_order':[], 'test::cargo_draft':['bike','ebike','bike'],
                                  'test::cargo_was_enabled':True})
         ui.clicked = 'test::cargo_confirm'
-        self.settings(ui)
+        self.assertEqual(self.settings(ui), (['bike', 'ebike', 'bike'], True))
         self.assertEqual(ui.session_state['test::truck_bike'], 2)
         self.assertEqual(ui.session_state['test::truck_ebike'], 1)
+
+    def test_confirm_fifteen_finishes_render_without_extra_rerun(self):
+        from cargo_order_ui import settings
+        from unittest.mock import Mock
+        ui = FakeUI(True)
+        order = ['bike'] * 4 + ['ebike'] * 11
+        ui.session_state.update({'test::cargo_was_enabled': True,
+                                 'test::cargo_draft': order,
+                                 'test::max_capacity': 15,
+                                 'test::truck_bike': 4,
+                                 'test::truck_ebike': 11})
+        ui.clicked = 'test::cargo_confirm'
+        rerun = Mock()
+        self.assertEqual(settings(ui, 'test', 15, False, rerun), (order, True))
+        rerun.assert_not_called()
+        self.assertEqual(ui.session_state['test::max_capacity'], 15)
+        ui.clicked = None
+        self.assertEqual(settings(ui, 'test', 15, False, rerun), (order, True))
 
 
 class CargoCardHTMLTests(unittest.TestCase):
