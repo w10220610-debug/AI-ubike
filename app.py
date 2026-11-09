@@ -7,6 +7,7 @@ from __future__ import annotations
 from cargo_order import (order_context, scoped_order, tail_unload,
                          complete as complete_cargo, loading_order, choose_loading,
                          label as cargo_label, validate as validate_cargo)
+from cargo_lookahead import plan_loading_lookahead
 
 # The app and its helper module can briefly come from different deployments.
 # Keep V29 bootable even if an older cargo_order.py has no plan_unload yet.
@@ -3217,7 +3218,11 @@ def get_base_token() -> str | None:
 
 
 def pop_floating_dispatch_station_request() -> str:
-    """取得懸浮搜尋送出的智慧調度場站，並立即移除一次性網址參數。"""
+    """Read the one-shot search request; do not clear its URL before it is applied.
+
+    Streamlit may rerun as soon as query_params changes. Clearing first used
+    to lose the selected station on mobile when a rerun happened in between.
+    """
     state_key = "floating_dispatch_station_request"
     requested_station = ""
     try:
@@ -3231,17 +3236,21 @@ def pop_floating_dispatch_station_request() -> str:
         requested_station = requested_station[0] if requested_station else ""
     requested_station = str(requested_station or "").strip()[:200]
     if requested_station:
-        # 先放進 session；若舊版 Streamlit 在清除網址參數時觸發 rerun，下一輪仍能接續處理。
         st.session_state[state_key] = requested_station
-        try:
-            if "dispatch_station" in st.query_params:
-                del st.query_params["dispatch_station"]
-        except Exception:
-            params = st.experimental_get_query_params()
+    return str(st.session_state.get(state_key, "") or "").strip()
+
+
+def acknowledge_floating_dispatch_station_request() -> None:
+    """Clear the URL only AFTER the manual choice has been stored."""
+    st.session_state.pop("floating_dispatch_station_request", None)
+    try:
+        if "dispatch_station" in st.query_params:
+            del st.query_params["dispatch_station"]
+    except Exception:
+        params = st.experimental_get_query_params()
+        if "dispatch_station" in params:
             params.pop("dispatch_station", None)
             st.experimental_set_query_params(**params)
-
-    return str(st.session_state.pop(state_key, "") or "").strip()
 
 
 def set_base_token(token: str) -> None:
@@ -4623,6 +4632,11 @@ st.set_page_config(
 
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
+
+**2026/11/10｜智慧調度手動搜尋與預測車輛排列**
+- 懸浮搜尋點選場站後，先保存手動選擇再清除網址參數；可查看排行榜外及無法執行的場站，不會覆蓋原本前 10 名。
+- 開啟車上排列後，僅對目前選擇場站以缺車、優先站、接近程度與最多暫移 3 台，預測後續最多 3 站的卸車順序並倒推本次上車排序。
+- 上車排列在按「前往此站」時鎖定；完成本站後依實際數量重新計算。未新增道路 API 查詢，後續站僅是裝卸預測而非導航。
 
 **2026/11/06｜車尾暫移 3 台卸車與現場作業彈性**
 - 開啟「依車上排列調度」後，可暫時移開最多 3 台車，卸下從車尾往內第 4 台；本站連續卸車會共用暫移作業，避免重複搬車。
@@ -11017,17 +11031,39 @@ def render_dispatch_plan_card(plan: dict, *, title: str) -> None:
                if temporarily_moved else '本站預估可直接從車尾卸車。')
             + '</div>'
         ) if unload_count else ""
+        preview_stops = plan.get("cargo_next_stops") or []
+        if preview_stops:
+            next_stop_lines = "".join(
+                '<div class="dispatch-cargo-caption">'
+                + f'{index}. {html.escape(str(stop.get("station_name") or ""))}'
+                + f'｜預計卸 🍌{safe_nonnegative_int(stop.get("unload_bike"))}'
+                + f'／🍊{safe_nonnegative_int(stop.get("unload_ebike"))}'
+                + f'｜暫移 {safe_nonnegative_int(stop.get("temporary_bikes"))} 台'
+                + ("｜優先" if stop.get("priority") else "")
+                + '</div>'
+                for index, stop in enumerate(preview_stops, start=1)
+            )
+            preview_line = (
+                '<div class="dispatch-cargo-hint"><strong>預測後續最多 3 站（方案 C）</strong>'
+                + next_stop_lines
+                + '<div class="dispatch-cargo-caption">綜合缺車、優先任務、'
+                  '地理接近程度及搬車成本；此為裝卸預測，非道路導航。'
+                  '完成本站後會依即時道路與車上實際排列重新計算。</div></div>'
+            )
+        else:
+            preview_line = ""
         hint_line = (
-            '<div class="dispatch-cargo-hint">此排列方便在 '
+            '<div class="dispatch-cargo-hint">預估先在 '
             + html.escape(hint) +
-            ' 卸車；下一站仍依道路與優先場站重新計算。</div>'
-        ) if hint else ""
+            ' 卸車；實際下一站仍依道路與優先場站重新計算。</div>'
+        ) if hint and not preview_stops else ""
         cargo_panel_html = f"""
           <div class="dispatch-cargo-panel">
             <div class="dispatch-cargo-heading">建議上車順序 <small>從車頭往車尾裝</small></div>
             <div class="dispatch-cargo-chips">{pickup_chips}</div>
             <div class="dispatch-cargo-caption">車尾最多可暫移 3 台、取得第 4 台；現場實際下車數量可以自行修改。</div>
             {unloading_line}
+            {preview_line}
             <details class="dispatch-cargo-details">
               <summary>查看完成後車上排列</summary>
               <div class="dispatch-cargo-complete">
@@ -11390,6 +11426,7 @@ def render_smart_dispatch(
     trip_locked = isinstance(active_trip, dict)
     if trip_locked and requested_station:
         st.session_state.pop(floating_station_request_key, None)
+        acknowledge_floating_dispatch_station_request()
         requested_station = ""
         st.info("目前已有鎖定中的目的地；完成或取消本站後，才能用懸浮搜尋改選下一站。")
     max_capacity_input_key = f"{dispatch_prefix}::max_capacity"
@@ -11961,7 +11998,9 @@ def render_smart_dispatch(
                 endpoint_location=endpoint_location,
             )
 
-    # 智慧調度頁不再顯示重複的搜尋欄；右側懸浮搜尋會把點選結果送到這裡。
+    # Apply floating search separately from the ranked top ten.
+    # A station without a usable dispatch task remains selectable for inspection,
+    # but can never be locked as a drivable/processable trip.
     if requested_station:
         st.session_state.pop(floating_station_request_key, None)
         normalized_request = normalize_station_key(requested_station)
@@ -11975,46 +12014,34 @@ def render_smart_dispatch(
         )
         if not matched_station:
             st.warning(f"懸浮搜尋找不到「{requested_station}」，請重新搜尋。")
+        elif allow_manual_station_choice:
+            st.session_state[manual_station_key] = matched_station
+            st.session_state[battery_force_refresh_key] = matched_station
+            persist_runtime_state(active_base["token"])
+            st.success(f"已選擇：{matched_station}。原智慧推薦前 10 名保持不變。")
         else:
-            requested_candidate = next(
-                (
-                    candidate for candidate in candidates
-                    if str(candidate.get("station_name")) == matched_station
-                ),
-                None,
-            )
-            if requested_candidate is not None and allow_manual_station_choice:
-                if matched_station == str(candidates[0]["station_name"]):
-                    st.session_state.pop(manual_station_key, None)
-                else:
-                    st.session_state[manual_station_key] = matched_station
-                st.session_state[battery_force_refresh_key] = matched_station
-                persist_runtime_state(active_base["token"])
-                st.success(f"已由懸浮搜尋套用：{matched_station}；仍需按『前往此站』才會正式鎖定。")
-            else:
-                inspection = inspect_dispatch_station(
-                    dispatch_df,
-                    station_name=matched_station,
-                    station_locations=station_locations,
-                    current_location=current_location,
-                    truck_bike=truck_bike,
-                    truck_ebike=truck_ebike,
-                    max_capacity=max_capacity,
-                    cooldowns=cooldowns,
-                    current_round=current_round,
-                    allowed_route_zone=(
-                        active_loop_phase
-                        if trip_mode == "環狀一圈" and resolved_loop_order
-                        else ""
-                    ),
-                )
-                st.warning(
-                    f"{matched_station} 目前無法設為下一站："
-                    f"{inspection.get('reason') or '目前沒有可執行的調度量。'}"
-                )
-                render_station_inspection_card(inspection)
+            st.warning("目前路線模式不支援手動選擇場站。")
+        # A URL update can cause a rerun; acknowledge only after session/persistent
+        # state has been changed, and never at the beginning of the request.
+        acknowledge_floating_dispatch_station_request()
 
     if not candidates:
+        selected_without_candidates = str(st.session_state.get(manual_station_key) or "").strip()
+        if selected_without_candidates:
+            inspection = inspect_dispatch_station(
+                dispatch_df, station_name=selected_without_candidates,
+                station_locations=station_locations, current_location=current_location,
+                truck_bike=truck_bike, truck_ebike=truck_ebike,
+                max_capacity=max_capacity, cooldowns=cooldowns,
+                current_round=current_round,
+                allowed_route_zone=(
+                    active_loop_phase if trip_mode == "環狀一圈" and resolved_loop_order else ""
+                ),
+            )
+            render_station_inspection_card(inspection)
+            if st.button("↩️ 清除手動選擇", key=f"{dispatch_prefix}::clear_empty_manual"):
+                st.session_state.pop(manual_station_key, None)
+                rerun_app()
         if trip_mode == "環狀一圈" and resolved_loop_order and active_loop_phase == resolved_loop_order[-1]:
             st.success(
                 f"環狀路線的 {resolved_loop_order[0]}、{resolved_loop_order[1]} 目前都沒有可執行場站，"
@@ -12104,16 +12131,56 @@ def render_smart_dispatch(
     )
 
     manual_station_name = str(st.session_state.get(manual_station_key) or "").strip()
+    manual_inspection = None
     if manual_station_name and not any(
         candidate["station_name"] == manual_station_name for candidate in candidates
     ):
-        st.session_state.pop(manual_station_key, None)
-        manual_station_name = ""
-
+        manual_inspection = inspect_dispatch_station(
+            dispatch_df, station_name=manual_station_name,
+            station_locations=station_locations, current_location=current_location,
+            truck_bike=truck_bike, truck_ebike=truck_ebike,
+            max_capacity=max_capacity, cooldowns=cooldowns, current_round=current_round,
+            allowed_route_zone=(
+                active_loop_phase if trip_mode == "環狀一圈" and resolved_loop_order else ""
+            ),
+        )
+    manual_is_blocked = bool(manual_inspection and not manual_inspection.get("processable"))
     recommended = next(
         (candidate for candidate in candidates if candidate["station_name"] == manual_station_name),
-        candidates[0],
+        manual_inspection if manual_inspection and not manual_is_blocked else candidates[0],
     )
+
+    # The top-ten list and AI scores stay untouched. Only the chosen/previewed
+    # plan gets a fresh, bounded 2–3 stop loading order (no new road requests).
+    if not manual_is_blocked and "cargo_after" in recommended:
+        try:
+            remaining_cargo, _down, _moves, _held = plan_cargo_unload(
+                recommended["cargo_before"],
+                safe_nonnegative_int(recommended.get("unload_bike")),
+                safe_nonnegative_int(recommended.get("unload_ebike")),
+            )
+            priority_names = {
+                str(row.get("場站名稱") or "")
+                for row in dispatch_df.to_dict(orient="records")
+                if priority_station_rank(str(row.get("場站名稱") or ""), status_cache) is not None
+            }
+            pickup_order, projected_stops = plan_loading_lookahead(
+                remaining_cargo,
+                safe_nonnegative_int(recommended.get("pickup_bike")),
+                safe_nonnegative_int(recommended.get("pickup_ebike")),
+                recommended, dispatch_df.to_dict(orient="records"),
+                station_locations, priority_names=priority_names, max_stops=3,
+            )
+            if projected_stops:
+                recommended = dict(recommended)
+                recommended["cargo_pickup"] = pickup_order
+                recommended["cargo_after"] = remaining_cargo + pickup_order
+                recommended["cargo_hint"] = projected_stops[0]["station_name"]
+                recommended["cargo_next_stops"] = projected_stops
+        except (ValueError, TypeError, KeyError):
+            # Keep the previously validated V29 loading suggestion if partial
+            # live data does not support a safe future-stop forecast.
+            pass
 
     voice_rejected = False
     if trip_mode == "一般模式":
@@ -12122,17 +12189,19 @@ def render_smart_dispatch(
             dispatch_prefix=dispatch_prefix,
             mode="candidate",
             candidates=candidates[:SMART_DISPATCH_CANDIDATE_LIMIT],
-            current_plan=recommended,
+            current_plan=None if manual_is_blocked else recommended,
             threshold=battery_threshold,
             priority_threshold=battery_priority_threshold,
-            auto_announce=auto_announce,
+            auto_announce=auto_announce and not manual_is_blocked,
+            context_status="blocked" if manual_is_blocked else "ready",
+            context_message="手動指定場站目前不可執行，請清除選擇或改選" if manual_is_blocked else "",
         )
         if isinstance(voice_event, dict):
             event_id = str(voice_event.get("event_id") or "").strip()
             if event_id and st.session_state.get(jarvis_processed_event_key) != event_id:
                 st.session_state[jarvis_processed_event_key] = event_id
                 event_type = str(voice_event.get("type") or "").strip()
-                if event_type == "lock_station":
+                if event_type == "lock_station" and not manual_is_blocked:
                     locked_station = str(voice_event.get("station_name") or recommended.get("station_name") or "").strip()
                     locked_candidate = next(
                         (candidate for candidate in candidates if str(candidate.get("station_name")) == locked_station),
@@ -12196,7 +12265,11 @@ def render_smart_dispatch(
             )
         )
     )
-    render_dispatch_plan_card(recommended, title=recommendation_title)
+    if manual_is_blocked:
+        render_station_inspection_card(manual_inspection)
+        st.warning("此場站已選為目前查看對象，但暫時沒有可執行的調度；原推薦排行榜仍保留。")
+    else:
+        render_dispatch_plan_card(recommended, title=recommendation_title)
 
     smart_alerts = build_station_alert_records(dispatch_df)
     if smart_alerts:
@@ -12435,6 +12508,7 @@ def render_smart_dispatch(
             type="primary",
             use_container_width=True,
             key=f"{dispatch_prefix}::accept_recommendation",
+            disabled=manual_is_blocked,
         )
     with decision_col_2:
         rejected = st.button(
@@ -12446,7 +12520,7 @@ def render_smart_dispatch(
     if voice_rejected:
         rejected = True
 
-    if accepted:
+    if accepted and not manual_is_blocked:
         locked_trip = dict(recommended)
         locked_trip["trip_id"] = uuid.uuid4().hex
         locked_trip["accepted_at"] = time.time()
