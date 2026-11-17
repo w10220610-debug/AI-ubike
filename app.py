@@ -7225,12 +7225,23 @@ def _build_inline_low_battery_pillars_html(
         requestVersions.set(key, version);
         setLoading(stationName);
         try {
-          const result = await service.queryStationByName(stationName, {
-            force,
-            ttlMs: 30000,
-            attempts: requestIsMobile ? 3 : 2,
-            timeoutMs: requestIsMobile ? 15000 : 12000,
-          });
+          // 優先共用獨立「電池查詢」引擎，等待其 iframe 完成掛載。
+          // 尚未就緒時退回原查詢流程，不改智慧調度演算法。
+          let fastQuery = win.__ubikeV29FastBattery?.queryInlineStation;
+          for (let retry = 0; typeof fastQuery !== "function" && retry < 15; retry += 1) {
+            await new Promise(resolve => win.setTimeout(resolve, 100));
+            if (win.__ubikeInlineBatteryGeneration !== generation
+              || requestVersions.get(key) !== version) return;
+            fastQuery = win.__ubikeV29FastBattery?.queryInlineStation;
+          }
+          const result = typeof fastQuery === "function"
+            ? await fastQuery(stationName, { force, threshold, priorityThreshold })
+            : await service.queryStationByName(stationName, {
+                force,
+                ttlMs: 30000,
+                attempts: requestIsMobile ? 3 : 2,
+                timeoutMs: requestIsMobile ? 15000 : 12000,
+              });
           if (requestVersions.get(key) === version) renderResult(stationName, result);
         } catch (_) {
           if (requestVersions.get(key) === version) renderError(stationName);
