@@ -178,6 +178,15 @@ def render_floating_server_battery(
  function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
  function num(v,f=0){const n=Number(v);return Number.isFinite(n)?n:f;}
  function norm(v){return String(v??'').normalize?.('NFKC').toLowerCase().replace(/臺/g,'台').replace(/^(?:youbike|ubike)\s*2\s*[.．]?\s*0\s*e?\s*[_\-－—:：]*\s*/i,'').replace(/公共自行車租賃站/g,'').replace(/[^0-9a-z\u3400-\u9fff]/g,'');}
+ // 共用獨立電池查詢已解析的場站編號，減少一般分析/智慧調度重複配對。
+ const inlineStationSpecs=new Map();
+ for(const group of Object.values(args.route_station_map||{})){
+  if(!Array.isArray(group))continue;
+  for(const spec of group){
+   const key=norm(spec?.name||spec?.station_name||'');
+   if(key&&!inlineStationSpecs.has(key))inlineStationSpecs.set(key,spec);
+  }
+ }
  function validCoord(v,min,max){const n=Number(v);return Number.isFinite(n)&&n>=min&&n<=max?n:null;}
  function stationKey(r){return String(r?.requested_name||r?.station_name||'');}
  function encodedStationKey(r){return encodeURIComponent(stationKey(r));}
@@ -296,6 +305,15 @@ def render_floating_server_battery(
    }
    if(cached&&now-cached.at<STALE_MS)return applyThresholds(enrich({...cached.value,source:'stale_cache',age_seconds:(now-cached.at)/1000,error:'',warning:String(lastError?.message||lastError)}),threshold,priority);
    throw lastError||new Error('電池資料查詢失敗');
+ }
+ async function queryInlineStation(stationName,options={}){
+  const name=String(stationName||'').trim();
+  if(!name)throw new Error('場站名稱不可為空');
+  const spec=inlineStationSpecs.get(norm(name))||{name};
+  const threshold=Math.max(0,Math.min(100,num(options.threshold,89)));
+  const priority=Math.max(0,Math.min(threshold,num(options.priorityThreshold,40)));
+  const result=await queryOne(spec,threshold,priority,Boolean(options.force));
+  return {stationNo:String(result.station_no||''),bikes:Array.isArray(result.bikes)?result.bikes:[],source:result.source||''};
  }
  function lowMin(r){const lows=Array.isArray(r.low_bikes)?r.low_bikes:[];return lows.length?Math.min(...lows.map(b=>num(b.battery_power,101))):101;}
  function safeBikes(r){return (Array.isArray(r.bikes)?r.bikes:[]).filter(b=>num(b.battery_power,-1)>num(r.threshold,89)).slice().sort(pillarSort);}
@@ -440,6 +458,7 @@ header{position:sticky;top:0;z-index:5;display:flex;justify-content:space-betwee
  // Also consume queued open requests when this component mounts after the toolbar.
  runtime.openBatteryQuery=open;
  runtime.closeBatteryQuery=close;
+ runtime.queryInlineStation=queryInlineStation;
  runtime.engineReady=true;
  if(runtime.openRequestHandler){
    try{doc.removeEventListener('ubike:open-battery',runtime.openRequestHandler);}catch(_){}
