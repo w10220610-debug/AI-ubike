@@ -1248,7 +1248,7 @@ TAITUNG_VIRTUAL_REGION_STATIONS = {
 
 def _taitung_virtual_station_key(value) -> str:
     """統一台/臺及空格，避免 Excel、官網站名寫法差異導致漏站。"""
-    return re.sub(r"\\s+", "", str(value or "")).replace("台", "臺").casefold()
+    return re.sub(r"\s+", "", str(value or "")).replace("台", "臺").casefold()
 
 
 def station_in_taitung_virtual_region(station_name: str, region_name: str) -> bool:
