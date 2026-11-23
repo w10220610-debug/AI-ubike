@@ -1216,7 +1216,6 @@ def format_dispatch_status(current_value, standard_value) -> str:
 
 
 
-@st.cache_data(show_spinner=False, max_entries=64)
 # 自訂地理區域僅用於一般分析篩選，保留 Excel 原始行政區及 D1/D2/D3。
 # 東大 = 知本校區正門與校內 8 站；知本地區 = 校外周邊及知本車站/溫泉/森林遊樂區。
 TAITUNG_VIRTUAL_REGION_STATIONS = {
@@ -1279,6 +1278,7 @@ def station_in_taitung_virtual_region(station_name: str, region_name: str) -> bo
     return name in configured or "知本" in name or "東遊季" in name
 
 
+@st.cache_data(show_spinner=False, max_entries=64)
 def build_analysis_result(status_df: pd.DataFrame) -> pd.DataFrame:
     """建立含現況、標準、缺多、空位與服務狀態的完整分析結果。"""
     result = status_df[["行政區", "場站名稱"]].astype(str).copy()
