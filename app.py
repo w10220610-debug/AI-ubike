@@ -1217,6 +1217,68 @@ def format_dispatch_status(current_value, standard_value) -> str:
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
+# 自訂地理區域僅用於一般分析篩選，保留 Excel 原始行政區及 D1/D2/D3。
+# 東大 = 知本校區正門與校內 8 站；知本地區 = 校外周邊及知本車站/溫泉/森林遊樂區。
+TAITUNG_VIRTUAL_REGION_STATIONS = {
+    "東大": frozenset({
+        "國立臺東大學知本校區正門",
+        "圖書資訊館及行政服務大樓",
+        "臺東大學人文學院",
+        "臺東大學師範學院",
+        "臺東大學理工學院",
+        "臺東大學第一學生宿舍",
+        "臺東大學第二學生宿舍餐飲中心",
+        "臺東大學學生活動中心",
+        "臺東大學鏡心書院",
+    }),
+    "知本地區": frozenset({
+        "立麗大酒店",
+        "知本代天府",
+        "知本火車站",
+        "知本芙儷渡假酒店",
+        "知本第一公有停車場",
+        "東遊季",
+        "7-11東遊季門市",
+        "7-ELEVEN東遊季門市",
+        "東台溫泉飯店",
+        "知本國家森林遊樂區",
+    }),
+}
+
+
+def _taitung_virtual_station_key(value) -> str:
+    """統一台/臺及空格，避免 Excel、官網站名寫法差異導致漏站。"""
+    return re.sub(r"\\s+", "", str(value or "")).replace("台", "臺").casefold()
+
+
+def station_in_taitung_virtual_region(station_name: str, region_name: str) -> bool:
+    """東大與知本地區彼此排除；原始行政區欄位不更動。"""
+    name = _taitung_virtual_station_key(station_name)
+    if not name or region_name not in TAITUNG_VIRTUAL_REGION_STATIONS:
+        return False
+    configured = {
+        _taitung_virtual_station_key(station)
+        for station in TAITUNG_VIRTUAL_REGION_STATIONS[region_name]
+    }
+    if region_name == "東大":
+        return (
+            name in configured
+            or (
+                "臺東大學" in name
+                and "附屬" not in name
+                and "臺東校區" not in name
+                and any(label in name for label in (
+                    "知本校區", "人文學院", "師範學院", "理工學院",
+                    "學生宿舍", "學生活動中心", "鏡心書院", "圖書資訊館",
+                    "行政服務大樓",
+                ))
+            )
+        )
+    if station_in_taitung_virtual_region(station_name, "東大"):
+        return False
+    return name in configured or "知本" in name or "東遊季" in name
+
+
 def build_analysis_result(status_df: pd.DataFrame) -> pd.DataFrame:
     """建立含現況、標準、缺多、空位與服務狀態的完整分析結果。"""
     result = status_df[["行政區", "場站名稱"]].astype(str).copy()
@@ -13167,6 +13229,10 @@ def render_general_analysis_results_fragment(
             sort=False,
         )
     }
+    if selected_region in TAITUNG_VIRTUAL_REGION_STATIONS:
+        # 虛擬區域跨越真實行政區，但總覽應僅有一組、同一站只加總一次。
+        source_region_groups = {selected_region: edited_df}
+        result_region_groups = {selected_region: result_df}
     empty_result_df = result_df.iloc[0:0]
     for region, region_source_df in source_region_groups.items():
         region_result_df = result_region_groups.get(region, empty_result_df)
@@ -13178,7 +13244,7 @@ def render_general_analysis_results_fragment(
                 if zone in ALL_DISPATCH_ZONES
             ]
         zone_prefix = "／".join(zone_values)
-        heading = f"{zone_prefix}｜{region}" if zone_prefix else region
+        heading = region if region in TAITUNG_VIRTUAL_REGION_STATIONS else (f"{zone_prefix}｜{region}" if zone_prefix else region)
         st.markdown(f"#### {heading}")
         render_region_inventory_overview(region, region_source_df)
         if region_result_df.empty:
@@ -13707,7 +13773,7 @@ zone_df = (
     if selected_zone == "全部"
     else base_df[base_df["路線區域"].astype(str).eq(selected_zone)]
 )
-regions = ["全部"] + list(dict.fromkeys(zone_df["行政區"].astype(str).tolist()))
+regions = ["全部"] + list(dict.fromkeys(zone_df["行政區"].astype(str).tolist())) + list(TAITUNG_VIRTUAL_REGION_STATIONS)
 selected_region = st.selectbox(
     "行政區",
     regions,
@@ -13716,11 +13782,18 @@ selected_region = st.selectbox(
         f"{selected_shift}::{selected_zone}"
     ),
 )
-working_df = (
-    zone_df
-    if selected_region == "全部"
-    else zone_df[zone_df["行政區"].astype(str).eq(selected_region)]
-)
+if selected_region in TAITUNG_VIRTUAL_REGION_STATIONS:
+    # 原始行政區跨臺東市/卑南鄉，按站名歸併，不重複新增資料列。
+    working_df = zone_df[
+        zone_df["場站名稱"].astype(str).map(
+            lambda name: station_in_taitung_virtual_region(name, selected_region)
+        )
+    ].copy()
+elif selected_region == "全部":
+    working_df = zone_df
+else:
+    working_df = zone_df[zone_df["行政區"].astype(str).eq(selected_region)]
+
 working_df = working_df.reset_index(drop=True)
 edited_df = working_df.copy()
 analysis_result_df = build_analysis_result(edited_df)
