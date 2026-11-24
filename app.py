@@ -3939,8 +3939,10 @@ def _build_floating_station_search_html(
         station_name = str(station_name_raw).strip()
         if not station_name:
             continue
+        no_dispatch = not dispatch_mode and str(bike_raw).strip() == "符合" and str(ebike_raw).strip() == "符合"
         stations.append(
             {
+                "noDispatch": no_dispatch,
                 "name": station_name,
                 "region": str(region_raw).strip(),
                 "bike": str(bike_raw).strip(),
@@ -3961,7 +3963,7 @@ def _build_floating_station_search_html(
     search_hint = (
         "搜尋目前智慧調度配置中的全部場站｜點選後設為目前選擇｜快捷鍵 Ctrl + K"
         if dispatch_mode
-        else "只搜尋目前的調度分析結果｜快捷鍵 Ctrl + K"
+        else "搜尋目前範圍內的場站｜配置正常僅於搜尋時顯示｜Ctrl + K"
     )
     floating_fingerprint = hashlib.sha1(
         f"{display_mode}|{page_mode}|{station_payload}".encode("utf-8")
@@ -4465,6 +4467,10 @@ def _build_floating_station_search_html(
             }}
 
             function jumpToStation(station) {{
+                if (!dispatchMode && station.noDispatch) {{
+                    showToast(`${{station.name}}：無需配置`);
+                    return;
+                }}
                 setOpen(false);
                 if (dispatchMode) {{
                     const targetUrl = new URL(win.location.href);
@@ -4506,7 +4512,8 @@ def _build_floating_station_search_html(
 
                 const status = doc.createElement("span");
                 status.className = "uft-result-status";
-                status.textContent = `2.0：${{station.bike || "—"}}｜2.0E：${{station.ebike || "—"}}`;
+                status.textContent = station.noDispatch ? "無需配置" : `2.0：${{station.bike || "—"}}｜2.0E：${{station.ebike || "—"}}`;
+                if (station.noDispatch) status.style.color = "#6ee7b7";
                 button.appendChild(status);
 
                 button.addEventListener("click", () => jumpToStation(station));
@@ -4515,21 +4522,22 @@ def _build_floating_station_search_html(
 
             function renderResults(query) {{
                 const keyword = String(query || "").trim().toLocaleLowerCase("zh-TW");
-                const matched = stations
+                const matchingStations = stations
                     .filter((station) => {{
-                        const haystack = `${{station.name}} ${{station.region}} ${{station.bike}} ${{station.ebike}}`
+                        if (!dispatchMode && station.noDispatch && !keyword) return false;
+                        const haystack = `${{station.name}} ${{station.region}} ${{station.bike}} ${{station.ebike}} ${{station.noDispatch ? "無需配置" : ""}}`
                             .toLocaleLowerCase("zh-TW");
                         return !keyword || haystack.includes(keyword);
-                    }})
-                    .slice(0, 12);
+                    }});
+                const matched = keyword && !dispatchMode ? matchingStations : matchingStations.slice(0, 12);
 
                 results.replaceChildren();
                 if (!matched.length) {{
                     const empty = doc.createElement("div");
                     empty.className = "uft-empty";
-                    empty.textContent = stations.length
-                        ? (dispatchMode ? "智慧調度配置中查無符合的場站" : "分析結果中查無符合的場站")
-                        : (dispatchMode ? "目前沒有可搜尋的智慧調度場站" : "目前沒有需要調度的分析結果");
+                    empty.textContent = dispatchMode
+                        ? (stations.length ? "智慧調度配置中查無符合的場站" : "目前沒有可搜尋的智慧調度場站")
+                        : (keyword ? "目前範圍內查無符合的場站" : "目前沒有需要調度的場站，輸入關鍵字可查詢配置正常的場站");
                     results.appendChild(empty);
                     return;
                 }}
@@ -4694,6 +4702,9 @@ st.set_page_config(
 
 _UPDATE_CONTENT_MD = f"""
 #### {APP_VERSION} 更新內容
+
+**2026/11/25｜一般分析搜尋顯示配置正常場站**
+- 輸入關鍵字後可搜尋目前分析範圍內配置正常的場站，標示「無需配置」；空白搜尋及一般調度列表維持原本顯示方式。
 
 **2026/11/10｜智慧調度手動搜尋與預測車輛排列**
 - 懸浮搜尋點選場站後，先保存手動選擇再清除網址參數；可查看排行榜外及無法執行的場站，不會覆蓋原本前 10 名。
@@ -13296,7 +13307,14 @@ def render_general_analysis_results_fragment(
                 )
 
     st.caption("即時車數來源：YouBike 官網；以現場狀況為準。")
-    render_floating_station_search(result_df, mobile_mode, page_mode="一般分析")
+    # 配置正常的場站只追加到搜尋資料，不改動調度列表、報表或電池查詢。
+    full_search_df = build_analysis_result(edited_df)
+    normal_search_df = full_search_df[
+        full_search_df["2.0 缺／多幾台"].eq("符合")
+        & full_search_df["2.0E 缺／多幾台"].eq("符合")
+    ]
+    search_result_df = pd.concat([result_df, normal_search_df], ignore_index=True)
+    render_floating_station_search(search_result_df, mobile_mode, page_mode="一般分析")
     render_floating_battery_query(
         battery_route_map,
         mobile_mode,
